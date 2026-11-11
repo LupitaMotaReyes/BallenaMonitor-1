@@ -26,7 +26,7 @@ constexpr int PIN_I2S_DOUT = 37;
 // ---- Volumen -------------------------------------------------------------
 // MASTER_GAIN: volumen general (0.0 a 1.0). 1.0 = maximo sin distorsion digital.
 // Si la bocina (8 ohm / 1 W) vibra o "raspa" a todo volumen, bajarlo a 0.85.
-constexpr float MASTER_GAIN = 1.0;
+constexpr float MASTER_GAIN = 0.7;   // volumen al 70 %
 //
 // Volumen de cada canal. Regla para que NO haya chasquidos ni "zzz":
 // Los efectos y voces llegan a ~0.79 de pico (-2 dB), asi que solos aguantan

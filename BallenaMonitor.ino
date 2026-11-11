@@ -30,6 +30,16 @@ esp_now_peer_info_t peerInfo;
 // Velocidad de la tortuga (duty PWM 0..255)
 constexpr uint8_t TURTLE_SPEED = 180;
 
+// MODO JUEGO: la velocidad depende de la fuerza de la contraccion.
+//   contraccion apenas sobre el umbral -> TURTLE_SPEED_MIN
+//   contraccion maxima (la de CAL; sin CAL, EMG_DISPLAY_FULL_MV) -> TURTLE_SPEED_MAX
+// TURTLE_SPEED_MIN debe bastar para que el motor arranque (si no, solo zumba).
+// En MODO REHABILITACION la velocidad sigue fija (TURTLE_SPEED).
+constexpr bool GAME_PROPORTIONAL_SPEED = true;
+constexpr uint8_t TURTLE_SPEED_MIN = 110;
+constexpr uint8_t TURTLE_SPEED_MAX = 255;
+constexpr uint8_t TURTLE_SPEED_STEP = 8;   // reenviar en cuanto la velocidad cambia esto
+
 // REGRESAR: cuanto tiempo retrocede la tortuga (ms)
 constexpr uint32_t REGRESAR_MS = 1000;
 
@@ -136,6 +146,7 @@ static void updateBatteryUI() {
 }
 
 static uint8_t lastSentCmd = MOTOR_CMD_STOP;
+static uint8_t lastSentSpeed = 0;
 static uint32_t lastSendMs = 0;
 
 void sendMotor(uint8_t cmd, uint8_t speed) {
@@ -145,6 +156,7 @@ void sendMotor(uint8_t cmd, uint8_t speed) {
         Serial.printf("Error al enviar comando %u\n", cmd);
     }
     lastSentCmd = cmd;
+    lastSentSpeed = speed;
     lastSendMs = millis();
 }
 
@@ -1007,6 +1019,16 @@ static const char *modeName(lv_obj_t *scr) {
     return "OTRA";
 }
 
+// Velocidad segun la intensidad de la contraccion (solo MODO JUEGO)
+static uint8_t gameSpeedFor(float rmsMv) {
+    float lo = emgThreshold();
+    float hi = emgMvcMv();
+    if (hi <= lo * 1.2f) hi = max(EMG_DISPLAY_FULL_MV, lo * 2.0f);  // sin CAL valida
+    float t = (rmsMv - lo) / (hi - lo);
+    t = constrain(t, 0.0f, 1.0f);
+    return (uint8_t)(TURTLE_SPEED_MIN + t * (TURTLE_SPEED_MAX - TURTLE_SPEED_MIN) + 0.5f);
+}
+
 static void turtleUpdate() {
     static bool wasActive = false;
     lv_obj_t *scr = lv_scr_act();
@@ -1046,8 +1068,10 @@ static void turtleUpdate() {
         }
     } else if (s.active && emgDriveAllowed(scr)) {
         // 수축하는 동안 100 ms 마다 전진 명령 (거북이는 300 ms 동안 못 받으면 스스로 정지)
-        if (lastSentCmd != MOTOR_CMD_FORWARD || now - lastSendMs >= MOTOR_RESEND_MS) {
-            sendMotor(MOTOR_CMD_FORWARD, TURTLE_SPEED);
+        uint8_t speed = (GAME_PROPORTIONAL_SPEED && scr == ui_MODO_JUEGO) ? gameSpeedFor(s.rmsMv) : TURTLE_SPEED;
+        if (lastSentCmd != MOTOR_CMD_FORWARD || now - lastSendMs >= MOTOR_RESEND_MS ||
+            abs((int)speed - (int)lastSentSpeed) >= TURTLE_SPEED_STEP) {
+            sendMotor(MOTOR_CMD_FORWARD, speed);
             if (!trialDrove) {
                 trialDrove = true;
                 trialLatencyMs = (int32_t)(millis() - trialOnsetMs);
