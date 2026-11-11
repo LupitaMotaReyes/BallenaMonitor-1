@@ -66,3 +66,16 @@ struct __attribute__((packed)) EmgMsg {
   uint16_t input_mv;  // nivel DC de la entrada del ADC (mV): ~0 o ~3100 = cable suelto
   uint8_t flags;      // bit0 = entrada saturada, bit1 = filtros calentando (primer segundo)
 };
+
+
+// ---- Bateria de la ballena: ESP32 EMG -> pantalla ---------------------------------
+// El ESP32 de la EMG mide la bateria de la ballena (divisor de voltaje en un pin ADC1)
+// y la manda cada BALLENA_BAT_PERIOD_MS por broadcast. La tortuga lo ignora.
+constexpr uint8_t BALLENA_BAT_MAGIC = 0x7D;
+constexpr uint32_t BALLENA_BAT_PERIOD_MS = 1000;
+
+struct __attribute__((packed)) BallenaBatMsg {
+  uint8_t magic;        // siempre BALLENA_BAT_MAGIC
+  uint16_t battery_mv;  // voltaje de la bateria (mV), ya corregido por el divisor
+  uint8_t battery_pct;  // 0..100
+};

@@ -73,6 +73,11 @@ static volatile uint32_t lastTelemetryMs = 0;
 static volatile uint16_t turtleBatteryMv = 0;
 static volatile uint8_t turtleBatteryPct = 0;
 
+// ---- Recepcion: bateria de la ballena (la manda el ESP32 de la EMG) ----
+static volatile uint32_t lastBallenaBatMs = 0;
+static volatile uint16_t ballenaBatteryMv = 0;
+static volatile uint8_t ballenaBatteryPct = 0;
+
 static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     if (info == NULL || data == NULL) return;
     // EMG del ESP32 del circuito analogico (de cualquier MAC)
@@ -82,6 +87,15 @@ static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, i
         emgRemoteCountSeq(m.seq);
         emgRemoteFeed(m.rms_x10 / 10.0f, m.peak_x10 / 10.0f, (float)m.input_mv, (m.flags & 1) != 0,
                       (m.flags & 2) != 0);
+        return;
+    }
+    // 고래 배터리 (EMG ESP32 가 보냄, 어느 MAC 이든 받음)
+    if (len == (int)sizeof(BallenaBatMsg) && data[0] == BALLENA_BAT_MAGIC) {
+        BallenaBatMsg m;
+        memcpy(&m, data, sizeof(m));
+        ballenaBatteryMv = m.battery_mv;
+        ballenaBatteryPct = m.battery_pct > 100 ? 100 : m.battery_pct;
+        lastBallenaBatMs = millis();
         return;
     }
     if (memcmp(info->src_addr, turtleAddress, 6) != 0 &&
@@ -102,8 +116,91 @@ bool turtleLinkOk() {
     return lastAckMs != 0 && millis() - lastAckMs < LINK_TIMEOUT_MS;
 }
 
+// ==========================================
+// 고래 배터리 표시 (코드로 생성, SquareLine 수정 불필요)
+// 모든 화면 왼쪽 위, 거북이 배터리 바로 옆에 같은 스타일로 표시됨:
+//
+//   [거북이 배터리 🐢]  [ 85% ]><   ← 고래 몸통(바) + 꼬리
+//
+// 위치/크기는 아래 상수로 조정 (거북이 아이콘과 겹치면 BALLENA_BAT_X 를 늘리기)
+constexpr lv_coord_t BALLENA_BAT_X = 104;   // 왼쪽 위 기준 x
+constexpr lv_coord_t BALLENA_BAT_Y = 8;
+constexpr lv_coord_t BALLENA_BAT_W = 64;    // 몸통(바) 폭
+constexpr lv_coord_t BALLENA_BAT_H = 24;    // 몸통(바) 높이
+constexpr uint32_t BALLENA_NEON = 0x4FD8F6; // 테두리/꼬리 색 (거북이 아이콘과 같은 하늘색 네온)
+
+static lv_obj_t *ballenaBox = NULL;
+static lv_obj_t *ballenaBar = NULL;
+static lv_obj_t *ballenaTxt = NULL;
+
+static void createBallenaBattery() {
+    // lv_layer_top: 화면이 바뀌어도 항상 보임
+    ballenaBox = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(ballenaBox);
+    lv_obj_set_size(ballenaBox, BALLENA_BAT_W + 26, BALLENA_BAT_H);
+    lv_obj_set_pos(ballenaBox, BALLENA_BAT_X, BALLENA_BAT_Y);
+    lv_obj_clear_flag(ballenaBox, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(ballenaBox, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 몸통 = 배터리 바
+    ballenaBar = lv_bar_create(ballenaBox);
+    lv_obj_set_size(ballenaBar, BALLENA_BAT_W, BALLENA_BAT_H);
+    lv_obj_set_pos(ballenaBar, 0, 0);
+    lv_bar_set_range(ballenaBar, 0, 100);
+    lv_bar_set_value(ballenaBar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_radius(ballenaBar, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(ballenaBar, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(ballenaBar, lv_color_hex(0x06243F), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(ballenaBar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(ballenaBar, lv_color_hex(BALLENA_NEON), LV_PART_MAIN);
+    lv_obj_set_style_border_width(ballenaBar, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ballenaBar, 3, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ballenaBar, lv_color_hex(0x3CCB5A), LV_PART_INDICATOR);
+    lv_obj_clear_flag(ballenaBar, LV_OBJ_FLAG_CLICKABLE);
+
+    // 꼬리 (선 3개로 그린 고래 꼬리)
+    static lv_point_t tail[] = {{0, 12}, {8, 12}, {14, 4}, {22, 1}, {19, 9}, {13, 12},
+                                {19, 15}, {22, 23}, {14, 20}, {8, 12}};
+    lv_obj_t *t = lv_line_create(ballenaBox);
+    lv_line_set_points(t, tail, sizeof(tail) / sizeof(tail[0]));
+    lv_obj_set_pos(t, BALLENA_BAT_W, 0);
+    lv_obj_set_style_line_width(t, 2, 0);
+    lv_obj_set_style_line_color(t, lv_color_hex(BALLENA_NEON), 0);
+    lv_obj_set_style_line_rounded(t, true, 0);
+
+    // 몸통 안의 % 글자
+    ballenaTxt = lv_label_create(ballenaBar);
+    lv_label_set_text(ballenaTxt, "--");
+    lv_obj_set_style_text_color(ballenaTxt, lv_color_white(), 0);
+    lv_obj_set_style_text_font(ballenaTxt, &lv_font_montserrat_14, 0);
+    lv_obj_center(ballenaTxt);
+}
+
+static void updateBallenaBattery() {
+    if (ballenaBar == NULL) return;
+    static int lastShown = -2;
+    bool fresh = lastBallenaBatMs != 0 && millis() - lastBallenaBatMs < BATTERY_TIMEOUT_MS;
+    int pct = fresh ? ballenaBatteryPct : -1;
+    if (pct == lastShown) return;
+    lastShown = pct;
+
+    char txt[8];
+    if (pct < 0) snprintf(txt, sizeof(txt), "--");
+    else snprintf(txt, sizeof(txt), "%d%%", pct);
+    lv_label_set_text(ballenaTxt, txt);
+    lv_obj_center(ballenaTxt);
+    lv_bar_set_value(ballenaBar, pct < 0 ? 0 : pct, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(ballenaBar, lv_color_hex(pct >= 0 && pct < BATTERY_LOW_PCT ? 0xE8231E : 0x3CCB5A),
+                              LV_PART_INDICATOR);
+    if (pct >= 0) {
+        Serial.printf("[BATERIA] ballena %u mV = %d%%\n", (unsigned)ballenaBatteryMv, pct);
+    }
+}
+// ==========================================
+
 // Actualiza las 6 barras/etiquetas de bateria (una por pantalla)
 static void updateBatteryUI() {
+    updateBallenaBattery();   // 고래 배터리도 같이 갱신
     static uint32_t lastUpdate = 0;
     static int lastShown = -2;
     if (millis() - lastUpdate < 500) return;
@@ -1335,6 +1432,7 @@ void setup() {
 
     // 배터리: 거북이가 보내는 값으로 자동 표시 (loop 의 updateBatteryUI).
     // 데이터가 오기 전에는 "--"
+    createBallenaBattery();   // 고래 배터리 (거북이 배터리 옆)
     updateBatteryUI();
 
     createEstopBanner();  // 비상정지 안내창 (평소에는 숨김)
