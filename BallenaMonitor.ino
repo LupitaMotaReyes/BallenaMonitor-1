@@ -124,44 +124,45 @@ bool turtleLinkOk() {
 //
 // 위치/크기는 아래 상수로 조정 (거북이 아이콘과 겹치면 BALLENA_BAT_X 를 늘리기)
 constexpr lv_coord_t BALLENA_BAT_X = 104;   // 왼쪽 위 기준 x
-constexpr lv_coord_t BALLENA_BAT_Y = 8;
+constexpr lv_coord_t BALLENA_BAT_Y = 10;    // 왼쪽 위 기준 y
 constexpr lv_coord_t BALLENA_BAT_W = 64;    // 몸통(바) 폭
 constexpr lv_coord_t BALLENA_BAT_H = 24;    // 몸통(바) 높이
 constexpr uint32_t BALLENA_NEON = 0x4FD8F6; // 테두리/꼬리 색 (거북이 아이콘과 같은 하늘색 네온)
 
-static lv_obj_t *ballenaBox = NULL;
-static lv_obj_t *ballenaBar = NULL;
-static lv_obj_t *ballenaTxt = NULL;
+// 화면마다 하나씩 (거북이 배터리처럼). 각 화면 안에 있어서
+// 연결 상태 창(CONEXION BLUETOOTH)과 EMG 그래프보다 항상 뒤에 그려짐.
+constexpr int BALLENA_N = 6;
+static lv_obj_t *ballenaBar[BALLENA_N] = {NULL};
+static lv_obj_t *ballenaTxt[BALLENA_N] = {NULL};
 
-static void createBallenaBattery() {
-    // lv_layer_top: 화면이 바뀌어도 항상 보임
-    ballenaBox = lv_obj_create(lv_layer_top());
-    lv_obj_remove_style_all(ballenaBox);
-    lv_obj_set_size(ballenaBox, BALLENA_BAT_W + 26, BALLENA_BAT_H);
-    lv_obj_set_pos(ballenaBox, BALLENA_BAT_X, BALLENA_BAT_Y);
-    lv_obj_clear_flag(ballenaBox, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(ballenaBox, LV_OBJ_FLAG_SCROLLABLE);
+static void createBallenaBatteryOn(lv_obj_t *scr, int i) {
+    lv_obj_t *box = lv_obj_create(scr);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, BALLENA_BAT_W + 26, BALLENA_BAT_H);
+    lv_obj_set_pos(box, BALLENA_BAT_X, BALLENA_BAT_Y);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
     // 몸통 = 배터리 바
-    ballenaBar = lv_bar_create(ballenaBox);
-    lv_obj_set_size(ballenaBar, BALLENA_BAT_W, BALLENA_BAT_H);
-    lv_obj_set_pos(ballenaBar, 0, 0);
-    lv_bar_set_range(ballenaBar, 0, 100);
-    lv_bar_set_value(ballenaBar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_radius(ballenaBar, 10, LV_PART_MAIN);
-    lv_obj_set_style_radius(ballenaBar, 8, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(ballenaBar, lv_color_hex(0x06243F), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(ballenaBar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(ballenaBar, lv_color_hex(BALLENA_NEON), LV_PART_MAIN);
-    lv_obj_set_style_border_width(ballenaBar, 2, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(ballenaBar, 3, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(ballenaBar, lv_color_hex(0x3CCB5A), LV_PART_INDICATOR);
-    lv_obj_clear_flag(ballenaBar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *bar = lv_bar_create(box);
+    lv_obj_set_size(bar, BALLENA_BAT_W, BALLENA_BAT_H);
+    lv_obj_set_pos(bar, 0, 0);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_radius(bar, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x06243F), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar, lv_color_hex(BALLENA_NEON), LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bar, 3, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x3CCB5A), LV_PART_INDICATOR);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
 
-    // 꼬리 (선 3개로 그린 고래 꼬리)
+    // 꼬리 (선으로 그린 고래 꼬리)
     static lv_point_t tail[] = {{0, 12}, {8, 12}, {14, 4}, {22, 1}, {19, 9}, {13, 12},
                                 {19, 15}, {22, 23}, {14, 20}, {8, 12}};
-    lv_obj_t *t = lv_line_create(ballenaBox);
+    lv_obj_t *t = lv_line_create(box);
     lv_line_set_points(t, tail, sizeof(tail) / sizeof(tail[0]));
     lv_obj_set_pos(t, BALLENA_BAT_W, 0);
     lv_obj_set_style_line_width(t, 2, 0);
@@ -169,15 +170,26 @@ static void createBallenaBattery() {
     lv_obj_set_style_line_rounded(t, true, 0);
 
     // 몸통 안의 % 글자
-    ballenaTxt = lv_label_create(ballenaBar);
-    lv_label_set_text(ballenaTxt, "--");
-    lv_obj_set_style_text_color(ballenaTxt, lv_color_white(), 0);
-    lv_obj_set_style_text_font(ballenaTxt, &lv_font_montserrat_14, 0);
-    lv_obj_center(ballenaTxt);
+    lv_obj_t *txt = lv_label_create(bar);
+    lv_label_set_text(txt, "--");
+    lv_obj_set_style_text_color(txt, lv_color_white(), 0);
+    lv_obj_set_style_text_font(txt, &lv_font_montserrat_14, 0);
+    lv_obj_center(txt);
+
+    ballenaBar[i] = bar;
+    ballenaTxt[i] = txt;
+}
+
+// setup() 에서 createConnPanel() 보다 먼저 호출해야 연결 창 아래에 깔림
+static void createBallenaBattery() {
+    lv_obj_t *screens[BALLENA_N] = {ui_INICIO, ui_CONEXION_BLUETOOTH, ui_SELECCION_DE_MODO,
+                                    ui_MODO_JUEGO, ui_MODO_REHABILITACION, ui_RESUMEN_DE_SESSION};
+    for (int i = 0; i < BALLENA_N; i++) {
+        if (screens[i] != NULL) createBallenaBatteryOn(screens[i], i);
+    }
 }
 
 static void updateBallenaBattery() {
-    if (ballenaBar == NULL) return;
     static int lastShown = -2;
     bool fresh = lastBallenaBatMs != 0 && millis() - lastBallenaBatMs < BATTERY_TIMEOUT_MS;
     int pct = fresh ? ballenaBatteryPct : -1;
@@ -187,11 +199,14 @@ static void updateBallenaBattery() {
     char txt[8];
     if (pct < 0) snprintf(txt, sizeof(txt), "--");
     else snprintf(txt, sizeof(txt), "%d%%", pct);
-    lv_label_set_text(ballenaTxt, txt);
-    lv_obj_center(ballenaTxt);
-    lv_bar_set_value(ballenaBar, pct < 0 ? 0 : pct, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(ballenaBar, lv_color_hex(pct >= 0 && pct < BATTERY_LOW_PCT ? 0xE8231E : 0x3CCB5A),
-                              LV_PART_INDICATOR);
+    lv_color_t col = lv_color_hex(pct >= 0 && pct < BATTERY_LOW_PCT ? 0xE8231E : 0x3CCB5A);
+    for (int i = 0; i < BALLENA_N; i++) {
+        if (ballenaBar[i] == NULL) continue;
+        lv_label_set_text(ballenaTxt[i], txt);
+        lv_obj_center(ballenaTxt[i]);
+        lv_bar_set_value(ballenaBar[i], pct < 0 ? 0 : pct, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(ballenaBar[i], col, LV_PART_INDICATOR);
+    }
     if (pct >= 0) {
         Serial.printf("[BATERIA] ballena %u mV = %d%%\n", (unsigned)ballenaBatteryMv, pct);
     }
