@@ -28,7 +28,19 @@ uint8_t turtleAddress[] = {0xE4, 0xB3, 0x23, 0xB6, 0x0A, 0x80};
 esp_now_peer_info_t peerInfo;
 
 // Velocidad de la tortuga (duty PWM 0..255)
-constexpr uint8_t TURTLE_SPEED = 180;
+constexpr uint8_t TURTLE_SPEED = 180;   // MODO REHABILITACION, REGRESAR, 화살표: 고정 속도
+
+// ---- MODO JUEGO: 근육 활성도(RMS)에 비례하는 속도 ----
+// RMS 가 임계값(umbral)일 때 JUEGO_SPEED_MIN, "최대 힘" 이상일 때 JUEGO_SPEED_MAX.
+// 최대 힘 = CAL 로 측정한 최대 수축(MVC). CAL 을 안 했으면 umbral x JUEGO_SIN_CAL_FACTOR.
+//   - JUEGO_SPEED_MIN: 거북이가 겨우 움직이는 값보다 조금 크게 (너무 작으면 모터가 안 돎)
+//   - JUEGO_MVC_FRACCION: MVC 의 몇 % 에서 최고 속도에 도달할지 (아이가 최대로 힘주지 않아도 되게 70 %)
+constexpr bool JUEGO_VELOCIDAD_VARIABLE = true;   // false = 예전처럼 고정 속도
+constexpr uint8_t JUEGO_SPEED_MIN = 110;
+constexpr uint8_t JUEGO_SPEED_MAX = 255;
+constexpr float JUEGO_MVC_FRACCION = 0.70f;
+constexpr float JUEGO_SIN_CAL_FACTOR = 4.0f;
+constexpr uint8_t JUEGO_SPEED_STEP = 10;          // 이만큼 이상 바뀌면 바로 새 속도 전송
 
 // REGRESAR: cuanto tiempo retrocede la tortuga (ms)
 constexpr uint32_t REGRESAR_MS = 1000;
@@ -124,7 +136,7 @@ bool turtleLinkOk() {
 //
 // 위치/크기는 아래 상수로 조정 (거북이 아이콘과 겹치면 BALLENA_BAT_X 를 늘리기)
 constexpr lv_coord_t BALLENA_BAT_X = 104;   // 왼쪽 위 기준 x
-constexpr lv_coord_t BALLENA_BAT_Y = 10;    // 왼쪽 위 기준 y
+constexpr lv_coord_t BALLENA_BAT_Y = 8;
 constexpr lv_coord_t BALLENA_BAT_W = 64;    // 몸통(바) 폭
 constexpr lv_coord_t BALLENA_BAT_H = 24;    // 몸통(바) 높이
 constexpr uint32_t BALLENA_NEON = 0x4FD8F6; // 테두리/꼬리 색 (거북이 아이콘과 같은 하늘색 네온)
@@ -248,15 +260,25 @@ static void updateBatteryUI() {
 }
 
 static uint8_t lastSentCmd = MOTOR_CMD_STOP;
+static uint8_t lastSentSpeed = 0;
 static uint32_t lastSendMs = 0;
 
 void sendMotor(uint8_t cmd, uint8_t speed) {
     MotorMsg msg = {MOTOR_MSG_MAGIC, cmd, speed};
     esp_err_t result = esp_now_send(turtleAddress, (uint8_t *)&msg, sizeof(msg));
     if (result != ESP_OK) {
-        Serial.printf("Error al enviar comando %u\n", cmd);
+        // 1초에 한 번만 출력 (100 ms 마다 찍으면 Serial 이 막힘)
+        static uint32_t lastErrMs = 0;
+        static uint32_t errCount = 0;
+        errCount++;
+        if (millis() - lastErrMs > 1000) {
+            Serial.printf("Error al enviar comando %u (x%lu, err %d)\n", cmd, (unsigned long)errCount, (int)result);
+            lastErrMs = millis();
+            errCount = 0;
+        }
     }
     lastSentCmd = cmd;
+    lastSentSpeed = speed;
     lastSendMs = millis();
 }
 
@@ -1038,6 +1060,101 @@ void on_Rehab_Screen_Load(lv_event_t * e) {
 
 
 // ==========================================
+// 위/아래 화살표 (발표용 수동 조작): 누르고 있는 동안만 거북이가 전진/후진
+//
+// 버튼은 코드로 만들어짐 (SquareLine 수정 불필요): createFlechas()
+// 위치는 아래 FLECHAS_* 상수로 조정.
+//
+// 손을 떼거나, 손가락이 버튼 밖으로 미끄러지거나, 화면을 나가면 바로 정지.
+// 비상정지·REGRESAR 가 우선. EMG 반복 횟수에는 포함되지 않음.
+// ※ Stage 3 평가에서는 "EMG 신호가 출력을 움직여야" 하므로 공식 시연에서는 쓰지 말 것.
+constexpr bool FLECHAS_ACTIVAS = true;   // false = 화살표 무시
+static int8_t manualDir = 0;             // +1 전진, -1 후진, 0 없음
+static lv_obj_t *manualBtn = NULL;
+
+static void startManual(lv_event_t *e, int8_t dir) {
+    if (!FLECHAS_ACTIVAS) return;
+    manualDir = dir;
+    manualBtn = e != NULL ? lv_event_get_target(e) : NULL;
+}
+
+void FlechaArriba(lv_event_t * e) { startManual(e, 1); }
+void FlechaAbajo(lv_event_t * e)  { startManual(e, -1); }
+
+void FlechaSoltar(lv_event_t * e) {
+    // 여기서는 표시만 하고, STOP 전송은 loop 의 turtleUpdate() 가 바로 다음에 함
+    // (터치 이벤트 안에서 무선 전송을 하지 않음)
+    manualDir = 0;
+    manualBtn = NULL;
+}
+
+// ---- 화살표 버튼 만들기 ----
+// 위치 (왼쪽 위 기준). 버튼 2개가 세로로 놓임: ▲ 위, ▼ 아래
+constexpr lv_coord_t FLECHAS_JUEGO_X = 400;   // MODO JUEGO: PUNTOS 아래, REGRESAR 위
+constexpr lv_coord_t FLECHAS_JUEGO_Y = 110;
+constexpr lv_coord_t FLECHAS_REHAB_X = 12;    // MODO REHABILITACION: 왼쪽 가운데
+constexpr lv_coord_t FLECHAS_REHAB_Y = 145;
+constexpr lv_coord_t FLECHA_W = 56;
+constexpr lv_coord_t FLECHA_H = 44;
+constexpr lv_coord_t FLECHA_GAP = 6;
+
+static void flechaPressEvent(lv_event_t *e) {
+    startManual(e, (int8_t)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void flechaReleaseEvent(lv_event_t *e) {
+    FlechaSoltar(e);
+}
+
+static void createFlechaBtn(lv_obj_t *scr, lv_coord_t x, lv_coord_t y, const char *sym, int8_t dir) {
+    lv_obj_t *b = lv_btn_create(scr);
+    lv_obj_set_size(b, FLECHA_W, FLECHA_H);
+    lv_obj_set_pos(b, x, y);
+    lv_obj_set_style_radius(b, 12, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x06243F), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x1E5B8C), LV_STATE_PRESSED);   // 누르면 밝아짐
+    lv_obj_set_style_border_color(b, lv_color_hex(0x6EC6FF), 0);              // 다른 버튼과 같은 네온
+    lv_obj_set_style_border_width(b, 2, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_add_event_cb(b, flechaPressEvent, LV_EVENT_PRESSED, (void *)(intptr_t)dir);
+    lv_obj_add_event_cb(b, flechaReleaseEvent, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(b, flechaReleaseEvent, LV_EVENT_PRESS_LOST, NULL);    // 손가락이 밖으로 나가도 정지
+    lv_obj_add_event_cb(b, bubbleEvent, LV_EVENT_PRESSED, NULL);              // 버튼 소리
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, sym);
+    lv_obj_set_style_text_color(l, lv_color_white(), 0);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+    lv_obj_center(l);
+}
+
+static void createFlechas() {
+    if (!FLECHAS_ACTIVAS) return;
+    if (ui_MODO_JUEGO != NULL) {
+        createFlechaBtn(ui_MODO_JUEGO, FLECHAS_JUEGO_X, FLECHAS_JUEGO_Y, LV_SYMBOL_UP, 1);
+        createFlechaBtn(ui_MODO_JUEGO, FLECHAS_JUEGO_X, FLECHAS_JUEGO_Y + FLECHA_H + FLECHA_GAP, LV_SYMBOL_DOWN, -1);
+    }
+    if (ui_MODO_REHABILITACION != NULL) {
+        createFlechaBtn(ui_MODO_REHABILITACION, FLECHAS_REHAB_X, FLECHAS_REHAB_Y, LV_SYMBOL_UP, 1);
+        createFlechaBtn(ui_MODO_REHABILITACION, FLECHAS_REHAB_X, FLECHAS_REHAB_Y + FLECHA_H + FLECHA_GAP, LV_SYMBOL_DOWN, -1);
+    }
+}
+
+// 버튼을 실제로 누르고 있고, 게임/재활 화면일 때만 true
+static bool manualActive(lv_obj_t *scr) {
+    if (manualDir == 0) return false;
+    bool ok = (scr == ui_MODO_JUEGO || scr == ui_MODO_REHABILITACION) && manualBtn != NULL &&
+              lv_obj_has_state(manualBtn, LV_STATE_PRESSED);
+    if (!ok) {   // Released 이벤트를 놓쳐도 여기서 정지
+        manualDir = 0;
+        manualBtn = NULL;
+    }
+    return ok;
+}
+// ==========================================
+
+
+// ==========================================
 // EMG → 거북이 (블록 다이어그램: 임계값을 넘는 동안 전진, 활성화가 끝나면 정지)
 
 // 비상정지: 버튼을 누르면 "잠김(latch)" 상태가 되고, 버튼을 놓은 뒤
@@ -1119,6 +1236,17 @@ static const char *modeName(lv_obj_t *scr) {
     return "OTRA";
 }
 
+// MODO JUEGO 의 전진 속도: RMS 가 클수록 빠름 (임계값 → MIN, 최대 힘 → MAX)
+static uint8_t juegoSpeed(float rmsMv) {
+    float thr = emgThreshold();
+    float top = emgMvcMv() * JUEGO_MVC_FRACCION;          // CAL 로 측정한 최대 수축 기준
+    if (top < thr * 1.5f) top = thr * JUEGO_SIN_CAL_FACTOR; // CAL 안 했거나 값이 너무 작으면
+    float x = (rmsMv - thr) / (top - thr);
+    if (x < 0) x = 0;
+    if (x > 1) x = 1;
+    return (uint8_t)lroundf(JUEGO_SPEED_MIN + x * (JUEGO_SPEED_MAX - JUEGO_SPEED_MIN));
+}
+
 static void turtleUpdate() {
     static bool wasActive = false;
     lv_obj_t *scr = lv_scr_act();
@@ -1156,10 +1284,20 @@ static void turtleUpdate() {
         } else if (lastSentCmd != MOTOR_CMD_REVERSE || now - lastSendMs >= MOTOR_RESEND_MS) {
             sendMotor(MOTOR_CMD_REVERSE, TURTLE_SPEED);
         }
+    } else if (manualActive(scr)) {
+        // 화살표: 누르고 있는 동안 100 ms 마다 명령 (EMG 보다 우선)
+        uint8_t cmd = manualDir > 0 ? MOTOR_CMD_FORWARD : MOTOR_CMD_REVERSE;
+        if (lastSentCmd != cmd || now - lastSendMs >= MOTOR_RESEND_MS) {
+            sendMotor(cmd, TURTLE_SPEED);
+        }
     } else if (s.active && emgDriveAllowed(scr)) {
         // 수축하는 동안 100 ms 마다 전진 명령 (거북이는 300 ms 동안 못 받으면 스스로 정지)
-        if (lastSentCmd != MOTOR_CMD_FORWARD || now - lastSendMs >= MOTOR_RESEND_MS) {
-            sendMotor(MOTOR_CMD_FORWARD, TURTLE_SPEED);
+        // MODO JUEGO: 근육 활성도에 비례하는 속도 / 그 외: 고정 속도
+        uint8_t speed = (JUEGO_VELOCIDAD_VARIABLE && scr == ui_MODO_JUEGO) ? juegoSpeed(s.rmsMv) : TURTLE_SPEED;
+        int dSpeed = (int)speed - (int)lastSentSpeed;
+        bool speedChanged = lastSentCmd == MOTOR_CMD_FORWARD && (dSpeed >= JUEGO_SPEED_STEP || dSpeed <= -JUEGO_SPEED_STEP);
+        if (lastSentCmd != MOTOR_CMD_FORWARD || speedChanged || now - lastSendMs >= MOTOR_RESEND_MS) {
+            sendMotor(MOTOR_CMD_FORWARD, speed);
             if (!trialDrove) {
                 trialDrove = true;
                 trialLatencyMs = (int32_t)(millis() - trialOnsetMs);
@@ -1348,6 +1486,12 @@ void Conectar(lv_event_t * e) {
 
 void setup() {
     Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+    // USB 로 노트북에 연결돼 있는데 Serial Monitor 가 안 열려 있으면, Serial 출력이
+    // 쌓여서 print 할 때마다 최대 100 ms 씩 기다림 → 화면이 멈춘 것처럼 됨.
+    // 0 = 기다리지 않고 버림 (화면이 절대 Serial 때문에 멈추지 않음)
+    Serial.setTxTimeoutMs(0);
+#endif
     audioBegin();
 
     if (ESTOP_PIN >= 0) pinMode(ESTOP_PIN, INPUT_PULLUP);
@@ -1453,6 +1597,7 @@ void setup() {
     createEstopBanner();  // 비상정지 안내창 (평소에는 숨김)
     createConnPanel();    // CONEXION BLUETOOTH 화면의 연결 상태 표시
     createPacienteLabel(); // MODO REHABILITACION: 현재 환자 ID (PAC-101 ...)
+    createFlechas();       // ▲▼ 화살표 (발표용 수동 조작, SquareLine 수정 불필요)
 
     // 게임 모드 (MODO JUEGO) 초기화
     puntos = 0;
@@ -1472,7 +1617,7 @@ void loop() {
     uint32_t t0 = millis();
     lv_timer_handler(); // LVGL 화면 업데이트 엔진 실행
     uint32_t dt = millis() - t0;
-    if (DEBUG_TIMING && dt > 20) {
+    if ((DEBUG_TIMING && dt > 20) || dt > 300) {   // 300 ms 이상 멈추면 항상 알려줌
         Serial.printf("lv_timer_handler: %lu ms\n", (unsigned long)dt);
     }
     delay(2);
