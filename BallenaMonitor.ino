@@ -28,17 +28,20 @@ uint8_t turtleAddress[] = {0xE4, 0xB3, 0x23, 0xB6, 0x0A, 0x80};
 esp_now_peer_info_t peerInfo;
 
 // Velocidad de la tortuga (duty PWM 0..255)
-constexpr uint8_t TURTLE_SPEED = 180;
+constexpr uint8_t TURTLE_SPEED = 180;   // REGRESAR, 화살표: 고정 속도
+constexpr uint8_t TURTLE_SPEED_REHAB = 255;   // MODO REHABILITACION: contraccion = 100 %
 
-// MODO JUEGO: la velocidad depende de la fuerza de la contraccion.
-//   contraccion apenas sobre el umbral -> TURTLE_SPEED_MIN
-//   contraccion maxima (la de CAL; sin CAL, EMG_DISPLAY_FULL_MV) -> TURTLE_SPEED_MAX
-// TURTLE_SPEED_MIN debe bastar para que el motor arranque (si no, solo zumba).
-// En MODO REHABILITACION la velocidad sigue fija (TURTLE_SPEED).
-constexpr bool GAME_PROPORTIONAL_SPEED = true;
-constexpr uint8_t TURTLE_SPEED_MIN = 110;
-constexpr uint8_t TURTLE_SPEED_MAX = 255;
-constexpr uint8_t TURTLE_SPEED_STEP = 8;   // reenviar en cuanto la velocidad cambia esto
+// ---- MODO JUEGO: 근육 활성도(RMS)에 비례하는 속도 ----
+// RMS 가 임계값(umbral)일 때 JUEGO_SPEED_MIN, "최대 힘" 이상일 때 JUEGO_SPEED_MAX.
+// 최대 힘 = CAL 로 측정한 최대 수축(MVC). CAL 을 안 했으면 umbral x JUEGO_SIN_CAL_FACTOR.
+//   - JUEGO_SPEED_MIN: 거북이가 겨우 움직이는 값보다 조금 크게 (너무 작으면 모터가 안 돎)
+//   - JUEGO_MVC_FRACCION: MVC 의 몇 % 에서 최고 속도에 도달할지 (아이가 최대로 힘주지 않아도 되게 70 %)
+constexpr bool JUEGO_VELOCIDAD_VARIABLE = true;   // false = 예전처럼 고정 속도
+constexpr uint8_t JUEGO_SPEED_MIN = 110;
+constexpr uint8_t JUEGO_SPEED_MAX = 255;
+constexpr float JUEGO_MVC_FRACCION = 0.70f;
+constexpr float JUEGO_SIN_CAL_FACTOR = 4.0f;
+constexpr uint8_t JUEGO_SPEED_STEP = 10;          // 이만큼 이상 바뀌면 바로 새 속도 전송
 
 // REGRESAR: cuanto tiempo retrocede la tortuga (ms)
 constexpr uint32_t REGRESAR_MS = 1000;
@@ -59,11 +62,35 @@ constexpr int ESTOP_ACTIVE_LEVEL = HIGH;
 
 // ---- Bateria de la tortuga (la manda la tortuga, ver motor_protocol.h) ----
 constexpr uint32_t BATTERY_TIMEOUT_MS = 5000;  // sin datos en 5 s -> se muestra "--"
-constexpr uint8_t BATTERY_LOW_PCT = 20;        // por debajo: barra en rojo
+// por debajo: barra en rojo. 15 % = 3.60 V, el mismo punto en que la tortuga
+// empieza a parpadear en rojo (0 % = 3.40 V: ahi la tortuga ya no mueve el motor).
+constexpr uint8_t BATTERY_LOW_PCT = 15;
+constexpr uint8_t BATTERY_MID_PCT = 40;        // por debajo (y >= BATTERY_LOW_PCT): amarillo
+
+// Color de las barras de bateria (tortuga y ballena): verde / amarillo / rojo
+static lv_color_t batteryColor(int pct) {
+    if (pct >= 0 && pct < BATTERY_LOW_PCT) return lv_color_hex(0xE8231E);   // rojo: cargar ya
+    if (pct >= 0 && pct < BATTERY_MID_PCT) return lv_color_hex(0xF2B200);   // amarillo: a la mitad
+    return lv_color_hex(0x3CCB5A);                                          // verde: bien
+}
 
 // true = imprimir por Serial cuando dibujar la pantalla tarda mas de 20 ms
 // (en false para que no ensucie el Serial Plotter de la EMG)
 constexpr bool DEBUG_TIMING = false;
+
+// Sonido (musica de fondo + efectos + voces). false = todo en silencio, p. ej. para
+// pruebas. Sin audioBegin() las llamadas a audioPlaySfx/audioMusic no hacen nada.
+constexpr bool SONIDO_ACTIVO = true;
+
+// Barra de volumen en la barra superior (todas las pantallas), entre la bateria de la
+// ballena y los iconos. Mismo azul cian que los iconos. Se guarda al soltarla.
+constexpr bool VOLUME_BAR = true;
+constexpr lv_coord_t VOL_X = 216;          // pixeles desde la esquina superior izquierda
+constexpr lv_coord_t VOL_Y = 2;            // (la bateria de la ballena llega hasta x = 194)
+constexpr lv_coord_t VOL_SLIDER_W = 115;    // termina en x ~370, antes de los iconos (x 378)
+constexpr uint8_t VOL_DEFAULT = 70;        // % la primera vez
+constexpr uint32_t VOL_COLOR = 0x73F2F6;   // cian de los iconos de la barra superior
+constexpr uint32_t VOL_TRACK_COLOR = 0x002C6A;
 
 // ---- Estado del enlace ESP-NOW (lo llena el callback de envio) ----
 static volatile uint32_t lastAckMs = 0;   // ultimo envio confirmado por la tortuga
@@ -83,6 +110,11 @@ static volatile uint32_t lastTelemetryMs = 0;
 static volatile uint16_t turtleBatteryMv = 0;
 static volatile uint8_t turtleBatteryPct = 0;
 
+// ---- Recepcion: bateria de la ballena (la manda el ESP32 de la EMG) ----
+static volatile uint32_t lastBallenaBatMs = 0;
+static volatile uint16_t ballenaBatteryMv = 0;
+static volatile uint8_t ballenaBatteryPct = 0;
+
 static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     if (info == NULL || data == NULL) return;
     // EMG del ESP32 del circuito analogico (de cualquier MAC)
@@ -92,6 +124,15 @@ static void onEspNowRecv(const esp_now_recv_info_t *info, const uint8_t *data, i
         emgRemoteCountSeq(m.seq);
         emgRemoteFeed(m.rms_x10 / 10.0f, m.peak_x10 / 10.0f, (float)m.input_mv, (m.flags & 1) != 0,
                       (m.flags & 2) != 0);
+        return;
+    }
+    // 고래 배터리 (EMG ESP32 가 보냄, 어느 MAC 이든 받음)
+    if (len == (int)sizeof(BallenaBatMsg) && data[0] == BALLENA_BAT_MAGIC) {
+        BallenaBatMsg m;
+        memcpy(&m, data, sizeof(m));
+        ballenaBatteryMv = m.battery_mv;
+        ballenaBatteryPct = m.battery_pct > 100 ? 100 : m.battery_pct;
+        lastBallenaBatMs = millis();
         return;
     }
     if (memcmp(info->src_addr, turtleAddress, 6) != 0 &&
@@ -112,8 +153,189 @@ bool turtleLinkOk() {
     return lastAckMs != 0 && millis() - lastAckMs < LINK_TIMEOUT_MS;
 }
 
+// ==========================================
+// 고래 배터리 표시 (코드로 생성, SquareLine 수정 불필요)
+// 모든 화면 왼쪽 위, 거북이 배터리 바로 옆에 같은 스타일로 표시됨:
+//
+//   [거북이 배터리 🐢]  [ 85% ]><   ← 고래 몸통(바) + 꼬리
+//
+// 위치/크기는 아래 상수로 조정 (거북이 아이콘과 겹치면 BALLENA_BAT_X 를 늘리기)
+constexpr lv_coord_t BALLENA_BAT_X = 104;   // 왼쪽 위 기준 x
+constexpr lv_coord_t BALLENA_BAT_Y = 8;
+constexpr lv_coord_t BALLENA_BAT_W = 64;    // 몸통(바) 폭
+constexpr lv_coord_t BALLENA_BAT_H = 24;    // 몸통(바) 높이
+constexpr uint32_t BALLENA_NEON = 0x4FD8F6; // 테두리/꼬리 색 (거북이 아이콘과 같은 하늘색 네온)
+
+// 화면마다 하나씩 (거북이 배터리처럼). 각 화면 안에 있어서
+// 연결 상태 창(CONEXION BLUETOOTH)과 EMG 그래프보다 항상 뒤에 그려짐.
+constexpr int BALLENA_N = 6;
+static lv_obj_t *ballenaBar[BALLENA_N] = {NULL};
+static lv_obj_t *ballenaTxt[BALLENA_N] = {NULL};
+
+static void createBallenaBatteryOn(lv_obj_t *scr, int i) {
+    lv_obj_t *box = lv_obj_create(scr);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, BALLENA_BAT_W + 26, BALLENA_BAT_H);
+    lv_obj_set_pos(box, BALLENA_BAT_X, BALLENA_BAT_Y);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 몸통 = 배터리 바
+    lv_obj_t *bar = lv_bar_create(box);
+    lv_obj_set_size(bar, BALLENA_BAT_W, BALLENA_BAT_H);
+    lv_obj_set_pos(bar, 0, 0);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_radius(bar, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x06243F), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar, lv_color_hex(BALLENA_NEON), LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bar, 3, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x3CCB5A), LV_PART_INDICATOR);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+
+    // 꼬리 (선으로 그린 고래 꼬리)
+    static lv_point_t tail[] = {{0, 12}, {8, 12}, {14, 4}, {22, 1}, {19, 9}, {13, 12},
+                                {19, 15}, {22, 23}, {14, 20}, {8, 12}};
+    lv_obj_t *t = lv_line_create(box);
+    lv_line_set_points(t, tail, sizeof(tail) / sizeof(tail[0]));
+    lv_obj_set_pos(t, BALLENA_BAT_W, 0);
+    lv_obj_set_style_line_width(t, 2, 0);
+    lv_obj_set_style_line_color(t, lv_color_hex(BALLENA_NEON), 0);
+    lv_obj_set_style_line_rounded(t, true, 0);
+
+    // 몸통 안의 % 글자
+    lv_obj_t *txt = lv_label_create(bar);
+    lv_label_set_text(txt, "--");
+    lv_obj_set_style_text_color(txt, lv_color_white(), 0);
+    lv_obj_set_style_text_font(txt, &lv_font_montserrat_14, 0);
+    lv_obj_center(txt);
+
+    ballenaBar[i] = bar;
+    ballenaTxt[i] = txt;
+}
+
+// setup() 에서 createConnPanel() 보다 먼저 호출해야 연결 창 아래에 깔림
+static void createBallenaBattery() {
+    lv_obj_t *screens[BALLENA_N] = {ui_INICIO, ui_CONEXION_BLUETOOTH, ui_SELECCION_DE_MODO,
+                                    ui_MODO_JUEGO, ui_MODO_REHABILITACION, ui_RESUMEN_DE_SESSION};
+    for (int i = 0; i < BALLENA_N; i++) {
+        if (screens[i] != NULL) createBallenaBatteryOn(screens[i], i);
+    }
+}
+
+static void updateBallenaBattery() {
+    static int lastShown = -2;
+    bool fresh = lastBallenaBatMs != 0 && millis() - lastBallenaBatMs < BATTERY_TIMEOUT_MS;
+    int pct = fresh ? ballenaBatteryPct : -1;
+    if (pct == lastShown) return;
+    lastShown = pct;
+
+    char txt[8];
+    if (pct < 0) snprintf(txt, sizeof(txt), "--");
+    else snprintf(txt, sizeof(txt), "%d%%", pct);
+    lv_color_t col = batteryColor(pct);
+    for (int i = 0; i < BALLENA_N; i++) {
+        if (ballenaBar[i] == NULL) continue;
+        lv_label_set_text(ballenaTxt[i], txt);
+        lv_obj_center(ballenaTxt[i]);
+        lv_bar_set_value(ballenaBar[i], pct < 0 ? 0 : pct, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(ballenaBar[i], col, LV_PART_INDICATOR);
+    }
+    if (pct >= 0) {
+        Serial.printf("[BATERIA] ballena %u mV = %d%%\n", (unsigned)ballenaBatteryMv, pct);
+    }
+}
+// ==========================================
+
+// ---- Barra de volumen (ver VOLUME_BAR) ----
+// Se crea por codigo en cada pantalla (SquareLine crea y destruye las pantallas al
+// navegar). El contenedor se marca con LV_OBJ_FLAG_USER_2 para encontrarlo.
+static Preferences volPrefs;
+
+static lv_obj_t *volumeCtrlOn(lv_obj_t *scr) {
+    if (scr == NULL) return NULL;
+    uint32_t n = lv_obj_get_child_cnt(scr);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(scr, i);
+        if (lv_obj_has_flag(c, LV_OBJ_FLAG_USER_2)) return c;
+    }
+    return NULL;
+}
+
+static void volumeIconUpdate(lv_obj_t *cont, uint8_t pct) {
+    lv_label_set_text(lv_obj_get_child(cont, 0),
+                      pct == 0 ? LV_SYMBOL_MUTE : pct < 50 ? LV_SYMBOL_VOLUME_MID : LV_SYMBOL_VOLUME_MAX);
+}
+
+static void volumeSliderCb(lv_event_t *e) {
+    lv_obj_t *slider = lv_event_get_target(e);
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_VALUE_CHANGED) {
+        audioSetVolume((uint8_t)lv_slider_get_value(slider));
+        volumeIconUpdate(lv_obj_get_parent(slider), audioGetVolume());
+    } else if (code == LV_EVENT_RELEASED) {
+        volPrefs.putUChar("vol", audioGetVolume());
+    }
+}
+
+static void createVolumeCtrl(lv_obj_t *scr) {
+    lv_obj_t *cont = lv_obj_create(scr);
+    lv_obj_remove_style_all(cont);
+    lv_obj_add_flag(cont, LV_OBJ_FLAG_USER_2);
+    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(cont, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(cont, 32 + VOL_SLIDER_W + 12, 36);
+    lv_obj_set_pos(cont, VOL_X, VOL_Y);
+
+    lv_obj_t *icon = lv_label_create(cont);   // hijo 0
+    lv_obj_set_style_text_color(icon, lv_color_hex(VOL_COLOR), LV_PART_MAIN);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *slider = lv_slider_create(cont);
+    lv_slider_set_range(slider, 0, 100);
+    lv_obj_set_size(slider, VOL_SLIDER_W, 8);
+    lv_obj_align(slider, LV_ALIGN_LEFT_MID, 32, 0);
+    lv_obj_set_ext_click_area(slider, 14);   // facil de tocar con el dedo
+    lv_obj_set_style_bg_color(slider, lv_color_hex(VOL_TRACK_COLOR), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(slider, 255, LV_PART_MAIN);
+    lv_obj_set_style_border_color(slider, lv_color_hex(VOL_COLOR), LV_PART_MAIN);
+    lv_obj_set_style_border_width(slider, 1, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(VOL_COLOR), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, lv_color_hex(VOL_COLOR), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 5, LV_PART_KNOB);
+    lv_slider_set_value(slider, audioGetVolume(), LV_ANIM_OFF);
+    lv_obj_add_event_cb(slider, volumeSliderCb, LV_EVENT_ALL, NULL);
+
+    volumeIconUpdate(cont, audioGetVolume());
+}
+
+// Crea la barra en las pantallas nuevas y sincroniza la de la pantalla activa
+static void updateVolumeUI() {
+    static uint32_t last = 0;
+    if (!VOLUME_BAR || !SONIDO_ACTIVO || millis() - last < 200) return;
+    last = millis();
+    lv_obj_t *screens[] = {ui_INICIO, ui_CONEXION_BLUETOOTH, ui_SELECCION_DE_MODO,
+                           ui_MODO_JUEGO, ui_MODO_REHABILITACION, ui_RESUMEN_DE_SESSION};
+    for (lv_obj_t *scr : screens) {
+        if (scr != NULL && volumeCtrlOn(scr) == NULL) createVolumeCtrl(scr);
+    }
+    lv_obj_t *cont = volumeCtrlOn(lv_scr_act());
+    if (cont != NULL) {
+        lv_obj_t *slider = lv_obj_get_child(cont, 1);
+        if (!lv_obj_has_state(slider, LV_STATE_PRESSED) && lv_slider_get_value(slider) != audioGetVolume()) {
+            lv_slider_set_value(slider, audioGetVolume(), LV_ANIM_OFF);
+            volumeIconUpdate(cont, audioGetVolume());
+        }
+    }
+}
+
 // Actualiza las 6 barras/etiquetas de bateria (una por pantalla)
 static void updateBatteryUI() {
+    updateBallenaBattery();   // 고래 배터리도 같이 갱신
     static uint32_t lastUpdate = 0;
     static int lastShown = -2;
     if (millis() - lastUpdate < 500) return;
@@ -127,7 +349,7 @@ static void updateBatteryUI() {
     char txt[8];
     if (pct < 0) snprintf(txt, sizeof(txt), "--");
     else snprintf(txt, sizeof(txt), "%d%%", pct);
-    lv_color_t col = lv_color_hex(pct >= 0 && pct < BATTERY_LOW_PCT ? 0xE8231E : 0x3CCB5A);
+    lv_color_t col = batteryColor(pct);
 
     lv_obj_t *labels[] = {ui_lblBatteryTxt1, ui_lblBatteryTxt2, ui_lblBatteryTxt3,
                           ui_lblBatteryTxt4, ui_lblBatteryTxt5, ui_lblBatteryTxt6};
@@ -153,7 +375,15 @@ void sendMotor(uint8_t cmd, uint8_t speed) {
     MotorMsg msg = {MOTOR_MSG_MAGIC, cmd, speed};
     esp_err_t result = esp_now_send(turtleAddress, (uint8_t *)&msg, sizeof(msg));
     if (result != ESP_OK) {
-        Serial.printf("Error al enviar comando %u\n", cmd);
+        // 1초에 한 번만 출력 (100 ms 마다 찍으면 Serial 이 막힘)
+        static uint32_t lastErrMs = 0;
+        static uint32_t errCount = 0;
+        errCount++;
+        if (millis() - lastErrMs > 1000) {
+            Serial.printf("Error al enviar comando %u (x%lu, err %d)\n", cmd, (unsigned long)errCount, (int)result);
+            lastErrMs = millis();
+            errCount = 0;
+        }
     }
     lastSentCmd = cmd;
     lastSentSpeed = speed;
@@ -938,6 +1168,101 @@ void on_Rehab_Screen_Load(lv_event_t * e) {
 
 
 // ==========================================
+// 위/아래 화살표 (발표용 수동 조작): 누르고 있는 동안만 거북이가 전진/후진
+//
+// 버튼은 코드로 만들어짐 (SquareLine 수정 불필요): createFlechas()
+// 위치는 아래 FLECHAS_* 상수로 조정.
+//
+// 손을 떼거나, 손가락이 버튼 밖으로 미끄러지거나, 화면을 나가면 바로 정지.
+// 비상정지·REGRESAR 가 우선. EMG 반복 횟수에는 포함되지 않음.
+// ※ Stage 3 평가에서는 "EMG 신호가 출력을 움직여야" 하므로 공식 시연에서는 쓰지 말 것.
+constexpr bool FLECHAS_ACTIVAS = true;   // false = 화살표 무시
+static int8_t manualDir = 0;             // +1 전진, -1 후진, 0 없음
+static lv_obj_t *manualBtn = NULL;
+
+static void startManual(lv_event_t *e, int8_t dir) {
+    if (!FLECHAS_ACTIVAS) return;
+    manualDir = dir;
+    manualBtn = e != NULL ? lv_event_get_target(e) : NULL;
+}
+
+void FlechaArriba(lv_event_t * e) { startManual(e, 1); }
+void FlechaAbajo(lv_event_t * e)  { startManual(e, -1); }
+
+void FlechaSoltar(lv_event_t * e) {
+    // 여기서는 표시만 하고, STOP 전송은 loop 의 turtleUpdate() 가 바로 다음에 함
+    // (터치 이벤트 안에서 무선 전송을 하지 않음)
+    manualDir = 0;
+    manualBtn = NULL;
+}
+
+// ---- 화살표 버튼 만들기 ----
+// 위치 (왼쪽 위 기준). 버튼 2개가 세로로 놓임: ▲ 위, ▼ 아래
+constexpr lv_coord_t FLECHAS_JUEGO_X = 400;   // MODO JUEGO: PUNTOS 아래, REGRESAR 위
+constexpr lv_coord_t FLECHAS_JUEGO_Y = 110;
+constexpr lv_coord_t FLECHAS_REHAB_X = 12;    // MODO REHABILITACION: 왼쪽 가운데
+constexpr lv_coord_t FLECHAS_REHAB_Y = 145;
+constexpr lv_coord_t FLECHA_W = 56;
+constexpr lv_coord_t FLECHA_H = 44;
+constexpr lv_coord_t FLECHA_GAP = 6;
+
+static void flechaPressEvent(lv_event_t *e) {
+    startManual(e, (int8_t)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void flechaReleaseEvent(lv_event_t *e) {
+    FlechaSoltar(e);
+}
+
+static void createFlechaBtn(lv_obj_t *scr, lv_coord_t x, lv_coord_t y, const char *sym, int8_t dir) {
+    lv_obj_t *b = lv_btn_create(scr);
+    lv_obj_set_size(b, FLECHA_W, FLECHA_H);
+    lv_obj_set_pos(b, x, y);
+    lv_obj_set_style_radius(b, 12, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x06243F), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x1E5B8C), LV_STATE_PRESSED);   // 누르면 밝아짐
+    lv_obj_set_style_border_color(b, lv_color_hex(0x6EC6FF), 0);              // 다른 버튼과 같은 네온
+    lv_obj_set_style_border_width(b, 2, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_add_event_cb(b, flechaPressEvent, LV_EVENT_PRESSED, (void *)(intptr_t)dir);
+    lv_obj_add_event_cb(b, flechaReleaseEvent, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(b, flechaReleaseEvent, LV_EVENT_PRESS_LOST, NULL);    // 손가락이 밖으로 나가도 정지
+    lv_obj_add_event_cb(b, bubbleEvent, LV_EVENT_PRESSED, NULL);              // 버튼 소리
+    lv_obj_t *l = lv_label_create(b);
+    lv_label_set_text(l, sym);
+    lv_obj_set_style_text_color(l, lv_color_white(), 0);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+    lv_obj_center(l);
+}
+
+static void createFlechas() {
+    if (!FLECHAS_ACTIVAS) return;
+    if (ui_MODO_JUEGO != NULL) {
+        createFlechaBtn(ui_MODO_JUEGO, FLECHAS_JUEGO_X, FLECHAS_JUEGO_Y, LV_SYMBOL_UP, 1);
+        createFlechaBtn(ui_MODO_JUEGO, FLECHAS_JUEGO_X, FLECHAS_JUEGO_Y + FLECHA_H + FLECHA_GAP, LV_SYMBOL_DOWN, -1);
+    }
+    if (ui_MODO_REHABILITACION != NULL) {
+        createFlechaBtn(ui_MODO_REHABILITACION, FLECHAS_REHAB_X, FLECHAS_REHAB_Y, LV_SYMBOL_UP, 1);
+        createFlechaBtn(ui_MODO_REHABILITACION, FLECHAS_REHAB_X, FLECHAS_REHAB_Y + FLECHA_H + FLECHA_GAP, LV_SYMBOL_DOWN, -1);
+    }
+}
+
+// 버튼을 실제로 누르고 있고, 게임/재활 화면일 때만 true
+static bool manualActive(lv_obj_t *scr) {
+    if (manualDir == 0) return false;
+    bool ok = (scr == ui_MODO_JUEGO || scr == ui_MODO_REHABILITACION) && manualBtn != NULL &&
+              lv_obj_has_state(manualBtn, LV_STATE_PRESSED);
+    if (!ok) {   // Released 이벤트를 놓쳐도 여기서 정지
+        manualDir = 0;
+        manualBtn = NULL;
+    }
+    return ok;
+}
+// ==========================================
+
+
+// ==========================================
 // EMG → 거북이 (블록 다이어그램: 임계값을 넘는 동안 전진, 활성화가 끝나면 정지)
 
 // 비상정지: 버튼을 누르면 "잠김(latch)" 상태가 되고, 버튼을 놓은 뒤
@@ -1019,14 +1344,15 @@ static const char *modeName(lv_obj_t *scr) {
     return "OTRA";
 }
 
-// Velocidad segun la intensidad de la contraccion (solo MODO JUEGO)
-static uint8_t gameSpeedFor(float rmsMv) {
-    float lo = emgThreshold();
-    float hi = emgMvcMv();
-    if (hi <= lo * 1.2f) hi = max(EMG_DISPLAY_FULL_MV, lo * 2.0f);  // sin CAL valida
-    float t = (rmsMv - lo) / (hi - lo);
-    t = constrain(t, 0.0f, 1.0f);
-    return (uint8_t)(TURTLE_SPEED_MIN + t * (TURTLE_SPEED_MAX - TURTLE_SPEED_MIN) + 0.5f);
+// MODO JUEGO 의 전진 속도: RMS 가 클수록 빠름 (임계값 → MIN, 최대 힘 → MAX)
+static uint8_t juegoSpeed(float rmsMv) {
+    float thr = emgThreshold();
+    float top = emgMvcMv() * JUEGO_MVC_FRACCION;          // CAL 로 측정한 최대 수축 기준
+    if (top < thr * 1.5f) top = thr * JUEGO_SIN_CAL_FACTOR; // CAL 안 했거나 값이 너무 작으면
+    float x = (rmsMv - thr) / (top - thr);
+    if (x < 0) x = 0;
+    if (x > 1) x = 1;
+    return (uint8_t)lroundf(JUEGO_SPEED_MIN + x * (JUEGO_SPEED_MAX - JUEGO_SPEED_MIN));
 }
 
 static void turtleUpdate() {
@@ -1066,11 +1392,21 @@ static void turtleUpdate() {
         } else if (lastSentCmd != MOTOR_CMD_REVERSE || now - lastSendMs >= MOTOR_RESEND_MS) {
             sendMotor(MOTOR_CMD_REVERSE, TURTLE_SPEED);
         }
+    } else if (manualActive(scr)) {
+        // 화살표: 누르고 있는 동안 100 ms 마다 명령 (EMG 보다 우선)
+        uint8_t cmd = manualDir > 0 ? MOTOR_CMD_FORWARD : MOTOR_CMD_REVERSE;
+        if (lastSentCmd != cmd || now - lastSendMs >= MOTOR_RESEND_MS) {
+            sendMotor(cmd, TURTLE_SPEED);
+        }
     } else if (s.active && emgDriveAllowed(scr)) {
         // 수축하는 동안 100 ms 마다 전진 명령 (거북이는 300 ms 동안 못 받으면 스스로 정지)
-        uint8_t speed = (GAME_PROPORTIONAL_SPEED && scr == ui_MODO_JUEGO) ? gameSpeedFor(s.rmsMv) : TURTLE_SPEED;
-        if (lastSentCmd != MOTOR_CMD_FORWARD || now - lastSendMs >= MOTOR_RESEND_MS ||
-            abs((int)speed - (int)lastSentSpeed) >= TURTLE_SPEED_STEP) {
+        // MODO JUEGO: 근육 활성도에 비례하는 속도 / 그 외: 고정 속도
+        // MODO REHABILITACION: 100 %
+        uint8_t speed = scr == ui_MODO_REHABILITACION ? TURTLE_SPEED_REHAB
+                      : (JUEGO_VELOCIDAD_VARIABLE && scr == ui_MODO_JUEGO) ? juegoSpeed(s.rmsMv) : TURTLE_SPEED;
+        int dSpeed = (int)speed - (int)lastSentSpeed;
+        bool speedChanged = lastSentCmd == MOTOR_CMD_FORWARD && (dSpeed >= JUEGO_SPEED_STEP || dSpeed <= -JUEGO_SPEED_STEP);
+        if (lastSentCmd != MOTOR_CMD_FORWARD || speedChanged || now - lastSendMs >= MOTOR_RESEND_MS) {
             sendMotor(MOTOR_CMD_FORWARD, speed);
             if (!trialDrove) {
                 trialDrove = true;
@@ -1260,7 +1596,15 @@ void Conectar(lv_event_t * e) {
 
 void setup() {
     Serial.begin(115200);
-    audioBegin();
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+    // USB 로 노트북에 연결돼 있는데 Serial Monitor 가 안 열려 있으면, Serial 출력이
+    // 쌓여서 print 할 때마다 최대 100 ms 씩 기다림 → 화면이 멈춘 것처럼 됨.
+    // 0 = 기다리지 않고 버림 (화면이 절대 Serial 때문에 멈추지 않음)
+    Serial.setTxTimeoutMs(0);
+#endif
+    volPrefs.begin("audio", false);
+    audioSetVolume(volPrefs.getUChar("vol", VOL_DEFAULT));
+    if (SONIDO_ACTIVO) audioBegin();
 
     if (ESTOP_PIN >= 0) pinMode(ESTOP_PIN, INPUT_PULLUP);
 
@@ -1359,11 +1703,13 @@ void setup() {
 
     // 배터리: 거북이가 보내는 값으로 자동 표시 (loop 의 updateBatteryUI).
     // 데이터가 오기 전에는 "--"
+    createBallenaBattery();   // 고래 배터리 (거북이 배터리 옆)
     updateBatteryUI();
 
     createEstopBanner();  // 비상정지 안내창 (평소에는 숨김)
     createConnPanel();    // CONEXION BLUETOOTH 화면의 연결 상태 표시
     createPacienteLabel(); // MODO REHABILITACION: 현재 환자 ID (PAC-101 ...)
+    createFlechas();       // ▲▼ 화살표 (발표용 수동 조작, SquareLine 수정 불필요)
 
     // 게임 모드 (MODO JUEGO) 초기화
     puntos = 0;
@@ -1383,7 +1729,7 @@ void loop() {
     uint32_t t0 = millis();
     lv_timer_handler(); // LVGL 화면 업데이트 엔진 실행
     uint32_t dt = millis() - t0;
-    if (DEBUG_TIMING && dt > 20) {
+    if ((DEBUG_TIMING && dt > 20) || dt > 300) {   // 300 ms 이상 멈추면 항상 알려줌
         Serial.printf("lv_timer_handler: %lu ms\n", (unsigned long)dt);
     }
     delay(2);
@@ -1394,6 +1740,7 @@ void loop() {
     estopUpdate();
     turtleUpdate();
     updateBatteryUI();
+    updateVolumeUI();
     lv_obj_t *scr = lv_scr_act();
     emgPanelUpdate(scr == ui_MODO_JUEGO || scr == ui_MODO_REHABILITACION);
     emgSerialUpdate();

@@ -38,3 +38,8 @@ void audioPlaySfx(Sfx sfx);
 
 // Musica de fondo en bucle. Llamar con el mismo valor varias veces no hace nada.
 void audioMusic(bool on);
+
+// Volumen general 0..100 % (la barra de volumen de la pantalla). 100 % = el maximo
+// que deja la bocina (MASTER_GAIN_MAX en audio.cpp). Se puede llamar antes de audioBegin().
+void audioSetVolume(uint8_t pct);
+uint8_t audioGetVolume();

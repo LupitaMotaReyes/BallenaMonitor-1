@@ -24,9 +24,12 @@ constexpr int PIN_I2S_LRCK = 35;
 constexpr int PIN_I2S_DOUT = 37;
 
 // ---- Volumen -------------------------------------------------------------
-// MASTER_GAIN: volumen general (0.0 a 1.0). 1.0 = maximo sin distorsion digital.
-// Si la bocina (8 ohm / 1 W) vibra o "raspa" a todo volumen, bajarlo a 0.85.
-constexpr float MASTER_GAIN = 0.7;   // volumen al 70 %
+// MASTER_GAIN_MAX: volumen general con la barra al 100 % (0.0 a 1.0).
+// 0.7 = maximo seguro para la bocina de 8 ohm / 1 W (~0.8 W en los picos); por encima
+// los picos pasan de 1 W y puede distorsionar o dañarse con el tiempo. NO subirlo de 0.75.
+// La barra de volumen de la pantalla va de 0 a este valor (audioSetVolume).
+constexpr float MASTER_GAIN_MAX = 0.7;
+static volatile uint8_t volumePct = 70;   // hasta que la pantalla cargue el guardado
 //
 // Volumen de cada canal. Regla para que NO haya chasquidos ni "zzz":
 // Los efectos y voces llegan a ~0.79 de pico (-2 dB), asi que solos aguantan
@@ -220,9 +223,9 @@ void audioBegin() {
   out->SetBuffers(I2S_DMA_BUFFERS, I2S_DMA_BUFFER_BYTES);
   out->SetPinout(PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT);
   out->SetOutputModeMono(true);  // una sola bocina
-  out->SetGain(MASTER_GAIN);
+  out->SetGain(MASTER_GAIN_MAX * volumePct / 100.0f);
 
-  mixer = new AudioOutputMixer(MIXER_BUFFER_SAMPLES, out);
+  mixer =new AudioOutputMixer(MIXER_BUFFER_SAMPLES, out);
   initChannel(music, MUSIC_GAIN);
   initChannel(fx, FX_GAIN);
   initChannel(voice, VOICE_GAIN);
@@ -231,6 +234,14 @@ void audioBegin() {
   // Core 0: la UI (loop de Arduino) corre en el core 1
   xTaskCreatePinnedToCore(audioTask, "audio", 8192, nullptr, 3, nullptr, 0);
 }
+
+void audioSetVolume(uint8_t pct) {
+  volumePct = pct > 100 ? 100 : pct;
+  // SetGain solo guarda un numero que lee la tarea de audio: se puede llamar desde la UI
+  if (out != nullptr) out->SetGain(MASTER_GAIN_MAX * volumePct / 100.0f);
+}
+
+uint8_t audioGetVolume() { return volumePct; }
 
 void audioPlaySfx(Sfx sfx) {
   if (cmdQueue == nullptr) return;
