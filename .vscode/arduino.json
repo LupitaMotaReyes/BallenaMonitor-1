@@ -1,0 +1,6 @@
+﻿{
+  "sketch": "BallenaMonitor.ino",
+  "board": "esp32:esp32:wt32-sc01-plus",
+  "configuration": "PartitionScheme=app12M",
+  "output": "build"
+}
