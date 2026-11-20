@@ -136,7 +136,7 @@ bool turtleLinkOk() {
 //
 // 위치/크기는 아래 상수로 조정 (거북이 아이콘과 겹치면 BALLENA_BAT_X 를 늘리기)
 constexpr lv_coord_t BALLENA_BAT_X = 104;   // 왼쪽 위 기준 x
-constexpr lv_coord_t BALLENA_BAT_Y = 8;
+constexpr lv_coord_t BALLENA_BAT_Y = 12;
 constexpr lv_coord_t BALLENA_BAT_W = 64;    // 몸통(바) 폭
 constexpr lv_coord_t BALLENA_BAT_H = 24;    // 몸통(바) 높이
 constexpr uint32_t BALLENA_NEON = 0x4FD8F6; // 테두리/꼬리 색 (거북이 아이콘과 같은 하늘색 네온)
@@ -225,6 +225,135 @@ static void updateBallenaBattery() {
 }
 // ==========================================
 
+// ==========================================
+// 거북이 배터리 표시 (코드로 생성, SquareLine 수정 불필요)
+// 배경 이미지에 그려진 거북이 모양과 SquareLine 의 BatteryBAR / lblBatteryTxt 대신,
+// 고래 배터리와 같은 방식으로 코드에서 그림:
+//
+//   ◁[ 85% ]◯·      ← 꼬리 + 등껍질(바) + 머리, 아래에 발 2개
+//
+// - 배경 이미지의 거북이는 검은 사각형으로 덮음 (TORTUGA_COVER_*)
+// - 각 화면 안에 만들어서 연결 상태 창과 EMG 그래프보다 항상 뒤에 그려짐
+// - 위치: 고래 배터리와 같은 높이 (BALLENA_BAT_Y 를 바꾸면 같이 움직임)
+constexpr lv_coord_t TORTUGA_BAT_X = 4;
+constexpr lv_coord_t TORTUGA_BAT_Y = 8;
+constexpr lv_coord_t TORTUGA_SHELL_W = 58;               // 등껍질(바) 폭
+constexpr lv_coord_t TORTUGA_SHELL_H = BALLENA_BAT_H;    // 등껍질(바) 높이
+// 배경 이미지의 거북이(x 5~88, y 5~39)를 덮는 검은 사각형. 아래 하늘색 선(y 46)은 안 덮음.
+// 덮인 부분이 보이면: TORTUGA_COVER_COLOR 를 0xFF0000 으로 바꿔서 범위를 확인하고 조정
+constexpr lv_coord_t TORTUGA_COVER_X = 0;
+constexpr lv_coord_t TORTUGA_COVER_Y = 0;
+constexpr lv_coord_t TORTUGA_COVER_W = 100;
+constexpr lv_coord_t TORTUGA_COVER_H = 45;
+constexpr uint32_t TORTUGA_COVER_COLOR = 0x000000;
+
+constexpr int TORTUGA_N = 6;
+static lv_obj_t *tortugaBar[TORTUGA_N] = {NULL};
+static lv_obj_t *tortugaTxt[TORTUGA_N] = {NULL};
+
+static lv_obj_t *tortugaLine(lv_obj_t *parent, const lv_point_t *pts, uint16_t n) {
+    lv_obj_t *l = lv_line_create(parent);
+    lv_line_set_points(l, pts, n);
+    lv_obj_set_pos(l, 0, 0);
+    lv_obj_set_style_line_width(l, 2, 0);
+    lv_obj_set_style_line_color(l, lv_color_hex(BALLENA_NEON), 0);
+    lv_obj_set_style_line_rounded(l, true, 0);
+    return l;
+}
+
+static void createTortugaBatteryOn(lv_obj_t *scr, int i) {
+    // 1) 배경 이미지의 거북이 덮기
+    lv_obj_t *cover = lv_obj_create(scr);
+    lv_obj_remove_style_all(cover);
+    lv_obj_set_pos(cover, TORTUGA_COVER_X, TORTUGA_COVER_Y);
+    lv_obj_set_size(cover, TORTUGA_COVER_W, TORTUGA_COVER_H);
+    lv_obj_set_style_bg_color(cover, lv_color_hex(TORTUGA_COVER_COLOR), 0);
+    lv_obj_set_style_bg_opa(cover, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(cover, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(cover, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 2) 코드로 그린 거북이 (꼬리 10 px + 등껍질 + 머리 20 px)
+    const lv_coord_t sx = 10;                       // 등껍질 시작 x (상자 안)
+    const lv_coord_t ex = sx + TORTUGA_SHELL_W;     // 등껍질 끝 x
+    const lv_coord_t H = TORTUGA_SHELL_H;
+    lv_obj_t *box = lv_obj_create(scr);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, ex + 22, H + 8);
+    lv_obj_set_pos(box, TORTUGA_BAT_X, TORTUGA_BAT_Y);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 꼬리 (왼쪽 작은 삼각형)
+    static lv_point_t tail[] = {{sx, 8}, {1, 9}, {3, 15}, {sx, 15}};
+    tortugaLine(box, tail, 4);
+    // 발 2개 (등껍질 아래)
+    static lv_point_t footL[] = {{sx + 5, H - 1}, {sx + 4, H + 6}, {sx + 13, H + 6}, {sx + 13, H - 1}};
+    static lv_point_t footR[] = {{ex - 14, H - 1}, {ex - 14, H + 6}, {ex - 5, H + 6}, {ex - 6, H - 1}};
+    tortugaLine(box, footL, 4);
+    tortugaLine(box, footR, 4);
+
+    // 머리 (동그라미 + 눈)
+    lv_obj_t *head = lv_obj_create(box);
+    lv_obj_remove_style_all(head);
+    lv_obj_set_size(head, 18, 18);
+    lv_obj_set_pos(head, ex - 1, (H - 18) / 2);   // 등껍질에 붙어 있게
+    lv_obj_set_style_radius(head, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_color(head, lv_color_hex(BALLENA_NEON), 0);
+    lv_obj_set_style_border_width(head, 2, 0);
+    lv_obj_set_style_bg_color(head, lv_color_hex(0x06243F), 0);
+    lv_obj_set_style_bg_opa(head, LV_OPA_COVER, 0);
+    lv_obj_t *eye = lv_obj_create(head);
+    lv_obj_remove_style_all(eye);
+    lv_obj_set_size(eye, 4, 4);
+    lv_obj_align(eye, LV_ALIGN_CENTER, 2, -1);
+    lv_obj_set_style_radius(eye, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(eye, lv_color_hex(BALLENA_NEON), 0);
+    lv_obj_set_style_bg_opa(eye, LV_OPA_COVER, 0);
+
+    // 등껍질 = 배터리 바 (고래 몸통과 같은 스타일)
+    lv_obj_t *bar = lv_bar_create(box);
+    lv_obj_set_size(bar, TORTUGA_SHELL_W, H);
+    lv_obj_set_pos(bar, sx, 0);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_radius(bar, 10, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x06243F), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar, lv_color_hex(BALLENA_NEON), LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(bar, 3, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x3CCB5A), LV_PART_INDICATOR);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *txt = lv_label_create(bar);
+    lv_label_set_text(txt, "--");
+    lv_obj_set_style_text_color(txt, lv_color_white(), 0);
+    lv_obj_set_style_text_font(txt, &lv_font_montserrat_14, 0);
+    lv_obj_center(txt);
+
+    tortugaBar[i] = bar;
+    tortugaTxt[i] = txt;
+}
+
+// setup() 에서 createBallenaBattery() / createConnPanel() 보다 먼저 호출
+static void createTortugaBattery() {
+    // SquareLine 의 거북이 배터리 바/글자는 숨김 (코드의 거북이로 대체)
+    lv_obj_t *old[] = {ui_BatteryBAR1, ui_BatteryBAR2, ui_BatteryBAR3,
+                       ui_BatteryBAR4, ui_BatteryBAR5, ui_BatteryBAR6,
+                       ui_lblBatteryTxt1, ui_lblBatteryTxt2, ui_lblBatteryTxt3,
+                       ui_lblBatteryTxt4, ui_lblBatteryTxt5, ui_lblBatteryTxt6};
+    for (lv_obj_t *o : old) {
+        if (o != NULL) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_t *screens[TORTUGA_N] = {ui_INICIO, ui_CONEXION_BLUETOOTH, ui_SELECCION_DE_MODO,
+                                    ui_MODO_JUEGO, ui_MODO_REHABILITACION, ui_RESUMEN_DE_SESSION};
+    for (int i = 0; i < TORTUGA_N; i++) {
+        if (screens[i] != NULL) createTortugaBatteryOn(screens[i], i);
+    }
+}
+// ==========================================
+
 // Actualiza las 6 barras/etiquetas de bateria (una por pantalla)
 static void updateBatteryUI() {
     updateBallenaBattery();   // 고래 배터리도 같이 갱신
@@ -243,16 +372,13 @@ static void updateBatteryUI() {
     else snprintf(txt, sizeof(txt), "%d%%", pct);
     lv_color_t col = lv_color_hex(pct >= 0 && pct < BATTERY_LOW_PCT ? 0xE8231E : 0x3CCB5A);
 
-    lv_obj_t *labels[] = {ui_lblBatteryTxt1, ui_lblBatteryTxt2, ui_lblBatteryTxt3,
-                          ui_lblBatteryTxt4, ui_lblBatteryTxt5, ui_lblBatteryTxt6};
-    lv_obj_t *bars[] = {ui_BatteryBAR1, ui_BatteryBAR2, ui_BatteryBAR3,
-                        ui_BatteryBAR4, ui_BatteryBAR5, ui_BatteryBAR6};
-    for (int i = 0; i < 6; i++) {
-        if (labels[i] != NULL) lv_label_set_text(labels[i], txt);
-        if (bars[i] != NULL) {
-            lv_bar_set_value(bars[i], pct < 0 ? 0 : pct, LV_ANIM_OFF);
-            lv_obj_set_style_bg_color(bars[i], col, LV_PART_INDICATOR);
-        }
+    // 코드로 만든 거북이 배터리 (createTortugaBattery)
+    for (int i = 0; i < TORTUGA_N; i++) {
+        if (tortugaBar[i] == NULL) continue;
+        lv_label_set_text(tortugaTxt[i], txt);
+        lv_obj_center(tortugaTxt[i]);
+        lv_bar_set_value(tortugaBar[i], pct < 0 ? 0 : pct, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(tortugaBar[i], col, LV_PART_INDICATOR);
     }
     if (pct >= 0) {
         Serial.printf("[BATERIA] tortuga %u mV = %d%%\n", (unsigned)turtleBatteryMv, pct);
@@ -508,6 +634,195 @@ void addBubbleToButtons() {
     if (ui_PALOMITA != NULL) lv_obj_add_event_cb(ui_PALOMITA, palomitaSoundEvent, LV_EVENT_PRESSED, NULL);
     if (ui_TACHE != NULL) lv_obj_add_event_cb(ui_TACHE, tacheSoundEvent, LV_EVENT_PRESSED, NULL);
 }
+
+// ==========================================
+// 볼륨 조절 (코드로 생성, SquareLine 수정 불필요)
+//
+// 평소: 고래 배터리 오른쪽에 작은 스피커 버튼만 보임.
+//       버튼은 각 화면 안에 만들어져서, 연결 상태 창과 EMG 그래프보다
+//       항상 뒤에 그려짐 (고래 배터리와 같은 방식) = 가리지 않음.
+// 누르면: 버튼 아래에 작은 볼륨 창이 열림
+//       [스피커] 전체 볼륨 (음성 + 효과음 + 음악)
+//       [음표]   배경 음악만
+//       창 밖을 누르거나 5초 동안 만지지 않으면 자동으로 닫힘.
+// 볼륨은 전원을 꺼도 유지됨 (audio.cpp 가 NVS 에 저장).
+constexpr lv_coord_t VOL_BTN_X = BALLENA_BAT_X + BALLENA_BAT_W + 34;  // 고래 꼬리 바로 오른쪽
+constexpr lv_coord_t VOL_BTN_Y = BALLENA_BAT_Y;
+constexpr lv_coord_t VOL_BTN_W = 40;
+constexpr lv_coord_t VOL_BTN_H = BALLENA_BAT_H;
+constexpr lv_coord_t VOL_PANEL_W = 300;
+constexpr lv_coord_t VOL_PANEL_H = 100;
+constexpr uint32_t VOL_AUTOCLOSE_MS = 5000;
+
+constexpr int VOL_N = 6;
+static lv_obj_t *volBtnLabel[VOL_N] = {NULL};
+static lv_obj_t *volBackdrop = NULL;   // 화면 전체를 덮는 투명 판 (창 밖 터치 = 닫기)
+static lv_obj_t *volPanel = NULL;
+static lv_obj_t *volSlider = NULL;
+static lv_obj_t *volValue = NULL;
+static lv_obj_t *volIcon = NULL;
+static lv_obj_t *musSlider = NULL;
+static lv_obj_t *musValue = NULL;
+static uint32_t volLastTouchMs = 0;
+
+static const char *volSymbol(uint8_t pct) {
+    if (pct == 0) return LV_SYMBOL_MUTE;
+    if (pct < 50) return LV_SYMBOL_VOLUME_MID;
+    return LV_SYMBOL_VOLUME_MAX;
+}
+
+static void volRefreshIcons() {
+    const char *s = volSymbol(audioGetVolume());
+    for (int i = 0; i < VOL_N; i++) {
+        if (volBtnLabel[i] != NULL) lv_label_set_text(volBtnLabel[i], s);
+    }
+    if (volIcon != NULL) lv_label_set_text(volIcon, s);
+}
+
+static void volClose() {
+    if (volBackdrop != NULL) lv_obj_add_flag(volBackdrop, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void volOpenEvent(lv_event_t *e) {
+    if (volBackdrop == NULL) return;
+    lv_slider_set_value(volSlider, audioGetVolume(), LV_ANIM_OFF);
+    lv_slider_set_value(musSlider, audioGetMusicVolume(), LV_ANIM_OFF);
+    lv_label_set_text_fmt(volValue, "%d%%", audioGetVolume());
+    lv_label_set_text_fmt(musValue, "%d%%", audioGetMusicVolume());
+    volRefreshIcons();
+    lv_obj_clear_flag(volBackdrop, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(volBackdrop);   // EMG 그래프보다 앞 (사용자가 직접 연 창)
+    volLastTouchMs = millis();
+}
+
+static void volBackdropEvent(lv_event_t *e) {
+    if (lv_event_get_target(e) == volBackdrop) volClose();   // 창 바깥을 눌렀을 때만
+}
+
+static void volSliderChanged(lv_event_t *e) {
+    lv_obj_t *s = lv_event_get_target(e);
+    int v = lv_slider_get_value(s);
+    volLastTouchMs = millis();
+    if (s == volSlider) {
+        audioSetVolume(v);
+        lv_label_set_text_fmt(volValue, "%d%%", v);
+        volRefreshIcons();
+    } else {
+        audioSetMusicVolume(v);
+        lv_label_set_text_fmt(musValue, "%d%%", v);
+    }
+}
+
+static void volSliderReleased(lv_event_t *e) {
+    volLastTouchMs = millis();
+    audioSaveVolume();                                       // 손을 뗄 때만 저장 (플래시 보호)
+    if (lv_event_get_target(e) == volSlider) audioPlaySfx(SFX_BUBBLE);  // 바뀐 크기 미리 듣기
+}
+
+// 5초 동안 안 만지면 자동으로 닫기
+static void volTimerCb(lv_timer_t *t) {
+    if (volBackdrop == NULL || lv_obj_has_flag(volBackdrop, LV_OBJ_FLAG_HIDDEN)) return;
+    if (lv_obj_has_state(volSlider, LV_STATE_PRESSED) || lv_obj_has_state(musSlider, LV_STATE_PRESSED)) {
+        volLastTouchMs = millis();
+        return;
+    }
+    if (millis() - volLastTouchMs > VOL_AUTOCLOSE_MS) volClose();
+}
+
+static lv_obj_t *volRow(lv_coord_t y, const char *symbol, lv_obj_t **slider, lv_obj_t **value) {
+    lv_obj_t *icon = lv_label_create(volPanel);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+    lv_obj_set_pos(icon, 0, y);
+
+    lv_obj_t *s = lv_slider_create(volPanel);
+    lv_obj_set_size(s, 176, 10);
+    lv_obj_set_pos(s, 36, y + 5);
+    lv_slider_set_range(s, 0, 100);
+    lv_obj_set_ext_click_area(s, 14);   // 손가락으로 잡기 쉽게
+    lv_obj_set_style_bg_color(s, lv_color_hex(0x1E5B8C), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s, lv_color_hex(BALLENA_NEON), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s, 6, LV_PART_KNOB);
+    lv_obj_add_event_cb(s, volSliderChanged, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s, volSliderReleased, LV_EVENT_RELEASED, NULL);
+
+    lv_obj_t *v = lv_label_create(volPanel);
+    lv_obj_set_width(v, 50);
+    lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_color(v, lv_color_white(), 0);
+    lv_obj_set_style_text_font(v, &lv_font_montserrat_14, 0);
+    lv_obj_align(v, LV_ALIGN_TOP_RIGHT, 0, y + 1);
+
+    *slider = s;
+    *value = v;
+    return icon;
+}
+
+static void createVolPanel() {
+    volBackdrop = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(volBackdrop);
+    lv_obj_set_size(volBackdrop, 480, 320);
+    lv_obj_set_pos(volBackdrop, 0, 0);
+    lv_obj_add_flag(volBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(volBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(volBackdrop, volBackdropEvent, LV_EVENT_CLICKED, NULL);
+
+    volPanel = lv_obj_create(volBackdrop);
+    lv_obj_set_size(volPanel, VOL_PANEL_W, VOL_PANEL_H);
+    lv_coord_t px = LV_CLAMP(4, VOL_BTN_X + VOL_BTN_W / 2 - VOL_PANEL_W / 2, 480 - VOL_PANEL_W - 4);
+    lv_obj_set_pos(volPanel, px, VOL_BTN_Y + VOL_BTN_H + 6);
+    lv_obj_set_style_bg_color(volPanel, lv_color_hex(0x06243F), 0);
+    lv_obj_set_style_bg_opa(volPanel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(volPanel, lv_color_hex(BALLENA_NEON), 0);
+    lv_obj_set_style_border_width(volPanel, 2, 0);
+    lv_obj_set_style_radius(volPanel, 14, 0);
+    lv_obj_set_style_pad_all(volPanel, 12, 0);
+    lv_obj_clear_flag(volPanel, LV_OBJ_FLAG_SCROLLABLE);
+
+    volIcon = volRow(4, LV_SYMBOL_VOLUME_MAX, &volSlider, &volValue);   // 전체
+    volRow(44, LV_SYMBOL_AUDIO, &musSlider, &musValue);                 // 음악
+
+    lv_obj_add_flag(volBackdrop, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_create(volTimerCb, 250, NULL);
+}
+
+static void createVolBtnOn(lv_obj_t *scr, int i) {
+    lv_obj_t *b = lv_btn_create(scr);
+    lv_obj_set_size(b, VOL_BTN_W, VOL_BTN_H);
+    lv_obj_set_pos(b, VOL_BTN_X, VOL_BTN_Y);
+    lv_obj_set_style_radius(b, 10, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x06243F), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(b, lv_color_hex(BALLENA_NEON), 0);
+    lv_obj_set_style_border_width(b, 2, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_pad_all(b, 0, 0);
+    lv_obj_set_ext_click_area(b, 8);
+    lv_obj_add_event_cb(b, bubbleEvent, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(b, volOpenEvent, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *l = lv_label_create(b);
+    lv_obj_set_style_text_color(l, lv_color_white(), 0);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+    lv_label_set_text(l, LV_SYMBOL_VOLUME_MAX);
+    lv_obj_center(l);
+    volBtnLabel[i] = l;
+}
+
+// setup() 에서 createConnPanel() 보다 먼저 호출 (연결 창 아래에 깔리도록)
+static void createVolumeControl() {
+    lv_obj_t *screens[VOL_N] = {ui_INICIO, ui_CONEXION_BLUETOOTH, ui_SELECCION_DE_MODO,
+                                ui_MODO_JUEGO, ui_MODO_REHABILITACION, ui_RESUMEN_DE_SESSION};
+    for (int i = 0; i < VOL_N; i++) {
+        if (screens[i] != NULL) createVolBtnOn(screens[i], i);
+    }
+    createVolPanel();
+    volRefreshIcons();
+}
+// ==========================================
 
 // 3. 물리치료사 정답 버튼
 void Palomita(lv_event_t * e) {
@@ -997,6 +1312,40 @@ void RepetirSession(lv_event_t * e) {
 }
 // ==========================================
 
+
+// ==========================================
+// 요약 화면 칭찬 음성 (RESUMEN DE SESSION 에 들어가면 한 번 말함)
+//   목표 달성 (재활: 목표 횟수 채움 / 게임: 1점 이상):
+//       ¡Bravo! · ¡Excelente! · ¡Lo lograste!
+//   목표 미달 (그래도 전부 긍정적인 말):
+//       ¡Buen trabajo! · ¡Muy bien, sigue así! · ¡Lo hiciste genial!
+//   각 그룹에서 무작위로 고르고, 바로 전에 나온 말은 다시 나오지 않음.
+constexpr bool RESUMEN_REACCION = true;           // false 로 하면 칭찬 음성 끔
+constexpr uint32_t RESUMEN_VOICE_DELAY_MS = 150;  // 화면 전환이 끝난 뒤 기다리는 시간 (ms)
+
+static const Sfx REACCION_LOGRO[] = {SFX_BRAVO, SFX_EXCELENTE, SFX_LO_LOGRASTE};
+static const Sfx REACCION_ANIMO[] = {SFX_BUEN_TRABAJO, SFX_MUY_BIEN, SFX_LO_HICISTE_GENIAL};
+static int ultimaReaccion = -1;   // 직전에 나온 음성 (연속 반복 방지)
+
+static void resumenReaccionTimerCb(lv_timer_t * t) {
+    if (lv_scr_act() != ui_RESUMEN_DE_SESSION) return;   // 그 사이에 화면을 나갔으면 말하지 않음
+    bool logro = (ultimoModo == 2) ? (progresoVal >= objetivoVal) : (puntos > 0);
+    const Sfx *lista = logro ? REACCION_LOGRO : REACCION_ANIMO;
+    const int n = 3;
+    int i = random(n);
+    if ((int)lista[i] == ultimaReaccion) i = (i + 1 + random(n - 1)) % n;  // 같은 말 연속 금지
+    ultimaReaccion = (int)lista[i];
+    audioPlaySfx(lista[i]);
+    Serial.printf("[RESUMEN] reaccion %s #%d\n", logro ? "LOGRO" : "ANIMO", i);
+}
+
+// RESUMEN DE SESSION 화면 전환이 완전히 끝났을 때 (LV_EVENT_SCREEN_LOADED)
+static void on_Resumen_Screen_Loaded(lv_event_t * e) {
+    if (!RESUMEN_REACCION) return;
+    lv_timer_t * t = lv_timer_create(resumenReaccionTimerCb, RESUMEN_VOICE_DELAY_MS, NULL);
+    lv_timer_set_repeat_count(t, 1);  // 한 번만 실행되고 자동 삭제
+}
+// ==========================================
 
 // ==========================================
 // 화면 진입 시 값을 기본값으로 되돌리는 함수
@@ -1588,10 +1937,16 @@ void setup() {
     if (ui_MODO_REHABILITACION != NULL) {
         lv_obj_add_event_cb(ui_MODO_REHABILITACION, on_Rehab_Screen_Load, LV_EVENT_SCREEN_LOAD_START, NULL);
     }
+    if (ui_RESUMEN_DE_SESSION != NULL) {
+        // 요약 화면: 결과에 맞는 칭찬 음성 (전환이 끝난 뒤)
+        lv_obj_add_event_cb(ui_RESUMEN_DE_SESSION, on_Resumen_Screen_Loaded, LV_EVENT_SCREEN_LOADED, NULL);
+    }
 
     // 배터리: 거북이가 보내는 값으로 자동 표시 (loop 의 updateBatteryUI).
     // 데이터가 오기 전에는 "--"
+    createTortugaBattery();   // 거북이 배터리 (코드로 그림, 배경 이미지의 거북이는 덮음)
     createBallenaBattery();   // 고래 배터리 (거북이 배터리 옆)
+    createVolumeControl();    // 볼륨 버튼 + 볼륨 창 (고래 배터리 오른쪽)
     updateBatteryUI();
 
     createEstopBanner();  // 비상정지 안내창 (평소에는 숨김)
