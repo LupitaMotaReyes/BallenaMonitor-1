@@ -1,5 +1,6 @@
 // Ver audio.h
 #include <Arduino.h>
+#include <Preferences.h>
 #include <AudioFileSourcePROGMEM.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutputI2S.h>
@@ -17,6 +18,12 @@
 #include "amarillo.h"
 #include "verde.h"
 #include "azul.h"
+#include "bravo.h"
+#include "excelente.h"
+#include "lo_lograste.h"
+#include "buen_trabajo.h"
+#include "muy_bien.h"
+#include "lo_hiciste_genial.h"
 
 // ---- Pines del amplificador I2S integrado (conector SPEAKER) ----------
 constexpr int PIN_I2S_BCLK = 36;
@@ -24,12 +31,9 @@ constexpr int PIN_I2S_LRCK = 35;
 constexpr int PIN_I2S_DOUT = 37;
 
 // ---- Volumen -------------------------------------------------------------
-// MASTER_GAIN_MAX: volumen general con la barra al 100 % (0.0 a 1.0).
-// 0.7 = maximo seguro para la bocina de 8 ohm / 1 W (~0.8 W en los picos); por encima
-// los picos pasan de 1 W y puede distorsionar o dañarse con el tiempo. NO subirlo de 0.75.
-// La barra de volumen de la pantalla va de 0 a este valor (audioSetVolume).
-constexpr float MASTER_GAIN_MAX = 0.7;
-static volatile uint8_t volumePct = 70;   // hasta que la pantalla cargue el guardado
+// MASTER_GAIN: volumen general (0.0 a 1.0). 1.0 = maximo sin distorsion digital.
+// Si la bocina (8 ohm / 1 W) vibra o "raspa" a todo volumen, bajarlo a 0.85.
+constexpr float MASTER_GAIN = 1.0;
 //
 // Volumen de cada canal. Regla para que NO haya chasquidos ni "zzz":
 // Los efectos y voces llegan a ~0.79 de pico (-2 dB), asi que solos aguantan
@@ -75,10 +79,19 @@ static const SfxData SFX_TABLE[] = {
   {amarillo, sizeof(amarillo)},  // SFX_AMARILLO
   {verde, sizeof(verde)},        // SFX_VERDE
   {azul, sizeof(azul)},          // SFX_AZUL
+  {bravo, sizeof(bravo)},                          // SFX_BRAVO
+  {excelente, sizeof(excelente)},                  // SFX_EXCELENTE
+  {lo_lograste, sizeof(lo_lograste)},              // SFX_LO_LOGRASTE
+  {buen_trabajo, sizeof(buen_trabajo)},            // SFX_BUEN_TRABAJO
+  {muy_bien, sizeof(muy_bien)},                    // SFX_MUY_BIEN
+  {lo_hiciste_genial, sizeof(lo_hiciste_genial)},  // SFX_LO_HICISTE_GENIAL
 };
 
+static_assert(sizeof(SFX_TABLE) / sizeof(SFX_TABLE[0]) == SFX_LO_HICISTE_GENIAL + 1,
+              "SFX_TABLE debe tener un sonido por cada valor del enum Sfx");
+
 static bool isVoice(Sfx sfx) {
-  return sfx >= SFX_ROJO && sfx <= SFX_AZUL;
+  return sfx >= SFX_ROJO && sfx <= SFX_LO_HICISTE_GENIAL;
 }
 
 enum AudioCmdType : uint8_t { CMD_SFX, CMD_MUSIC_ON, CMD_MUSIC_OFF };
@@ -103,6 +116,18 @@ static bool musicRequested = false;  // solo lo toca el hilo de la UI
 static AudioOutputI2S *out;
 static AudioOutputMixer *mixer;
 static Channel music, fx, voice;
+
+// Volumen elegido en la pantalla (0..100 %). Los escribe la UI (core 1) y los
+// lee la tarea de audio (core 0); un uint8_t se escribe de una sola vez.
+static volatile uint8_t volPct = 100;
+static volatile uint8_t musicPct = 100;
+
+// Curva cuadratica: el oido percibe mejor los cambios asi que en linea recta
+// (50 % del slider = 1/4 de amplitud, unos -12 dB).
+static float pctToGain(uint8_t pct) {
+  float x = pct / 100.0f;
+  return x * x;
+}
 
 static void initChannel(Channel &ch, float gain) {
   ch.stub = mixer->NewInput();
@@ -153,7 +178,8 @@ static void updateGains() {
   bool voiceOn = voice.mp3->isRunning();
   bool fxOn = fx.mp3->isRunning();
 
-  rampGain(music, (voiceOn || fxOn) ? MUSIC_DUCK_GAIN : MUSIC_GAIN);
+  float musicScale = pctToGain(musicPct);
+  rampGain(music, ((voiceOn || fxOn) ? MUSIC_DUCK_GAIN : MUSIC_GAIN) * musicScale);
   rampGain(fx, voiceOn ? FX_UNDER_VOICE_GAIN : FX_GAIN);
   // La voz siempre a su volumen (sin rampa: tiene que oirse completa desde el inicio)
 }
@@ -209,6 +235,13 @@ static void audioTask(void *) {
     serviceChannel(voice);
     updateGains();
 
+    // Volumen general (solo se cambia aqui, en la tarea de audio)
+    static uint8_t appliedVol = 255;
+    if (volPct != appliedVol) {
+      appliedVol = volPct;
+      out->SetGain(MASTER_GAIN * pctToGain(appliedVol));
+    }
+
     // Si no suena nada, el mezclador manda silencio al I2S. Asi el I2S nunca
     // se queda vacio (vacio repite el ultimo audio = ruido).
     mixer->loop();
@@ -219,14 +252,21 @@ static void audioTask(void *) {
 }
 
 void audioBegin() {
+  Preferences p;
+  if (p.begin("audio", true)) {
+    volPct = min<uint8_t>(p.getUChar("vol", 100), 100);
+    musicPct = min<uint8_t>(p.getUChar("mus", 100), 100);
+    p.end();
+  }
+
   out = new AudioOutputI2S();
   out->SetBuffers(I2S_DMA_BUFFERS, I2S_DMA_BUFFER_BYTES);
   out->SetPinout(PIN_I2S_BCLK, PIN_I2S_LRCK, PIN_I2S_DOUT);
   out->SetOutputModeMono(true);  // una sola bocina
-  out->SetGain(MASTER_GAIN_MAX * volumePct / 100.0f);
+  out->SetGain(MASTER_GAIN * pctToGain(volPct));
 
-  mixer =new AudioOutputMixer(MIXER_BUFFER_SAMPLES, out);
-  initChannel(music, MUSIC_GAIN);
+  mixer = new AudioOutputMixer(MIXER_BUFFER_SAMPLES, out);
+  initChannel(music, MUSIC_GAIN * pctToGain(musicPct));
   initChannel(fx, FX_GAIN);
   initChannel(voice, VOICE_GAIN);
 
@@ -234,14 +274,6 @@ void audioBegin() {
   // Core 0: la UI (loop de Arduino) corre en el core 1
   xTaskCreatePinnedToCore(audioTask, "audio", 8192, nullptr, 3, nullptr, 0);
 }
-
-void audioSetVolume(uint8_t pct) {
-  volumePct = pct > 100 ? 100 : pct;
-  // SetGain solo guarda un numero que lee la tarea de audio: se puede llamar desde la UI
-  if (out != nullptr) out->SetGain(MASTER_GAIN_MAX * volumePct / 100.0f);
-}
-
-uint8_t audioGetVolume() { return volumePct; }
 
 void audioPlaySfx(Sfx sfx) {
   if (cmdQueue == nullptr) return;
@@ -254,4 +286,18 @@ void audioMusic(bool on) {
   musicRequested = on;
   AudioCmd cmd = {on ? CMD_MUSIC_ON : CMD_MUSIC_OFF, SFX_CORRECT};
   xQueueSend(cmdQueue, &cmd, 0);
+}
+
+void audioSetVolume(uint8_t pct) { volPct = min<uint8_t>(pct, 100); }
+void audioSetMusicVolume(uint8_t pct) { musicPct = min<uint8_t>(pct, 100); }
+uint8_t audioGetVolume() { return volPct; }
+uint8_t audioGetMusicVolume() { return musicPct; }
+
+void audioSaveVolume() {
+  Preferences p;
+  if (p.begin("audio", false)) {
+    p.putUChar("vol", volPct);
+    p.putUChar("mus", musicPct);
+    p.end();
+  }
 }
