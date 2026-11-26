@@ -51,6 +51,23 @@ static uint32_t nSamples = 0;
 
 static Preferences prefs;
 
+// ---- Pila de la ballena (la lee el timer, la consulta loop()) -----------------
+static volatile uint32_t batPinMv = 0;    // ultimo promedio bueno en el pin (mV)
+static volatile uint32_t batLastMs = 0;   // millis() de esa lectura
+
+static void readBallenaBatteryPin() {
+  uint32_t acc = 0;
+  for (int i = 0; i < 4; i++) {
+    uint32_t r = analogReadMilliVolts(BALLENA_BAT_PIN);
+    if (r == 0) return;   // ADC2 ocupado por el Wi-Fi (o pila desconectada): se ignora
+    acc += r;
+  }
+  uint32_t mv = acc / 4;
+  // suavizado (~8 s) para que el % no brinque entre lecturas
+  batPinMv = batPinMv == 0 ? mv : (batPinMv * 7 + mv) / 8;
+  batLastMs = millis();
+}
+
 static void emgSampleCb(void *) {
   // 0) Sobremuestreo x4 (mV ya calibrados por el ESP32)
   uint32_t acc = 0;
@@ -114,6 +131,9 @@ static void emgSampleCb(void *) {
 
   if (v <= SAT_LOW_MV || v >= SAT_HIGH_MV) satHold = SAT_HOLD_SAMPLES;
   else if (satHold > 0) satHold--;
+
+  // pila de la ballena: una lectura por segundo
+  if (BALLENA_BAT_PIN >= 0 && nSamples % EMG_FS_HZ == 0) readBallenaBatteryPin();
 
   portENTER_CRITICAL(&emgMux);
   shared.rmsMv = rmsSuave;
@@ -216,6 +236,10 @@ void emgBegin() {
   analogReadResolution(12);
   analogSetPinAttenuation(EMG_PIN, ADC_11db);
   analogReadMilliVolts(EMG_PIN);  // inicializa el canal y su calibracion antes del timer
+  if (BALLENA_BAT_PIN >= 0) {
+    analogSetPinAttenuation(BALLENA_BAT_PIN, ADC_11db);
+    readBallenaBatteryPin();
+  }
 
   esp_timer_create_args_t args = {};
   args.callback = emgSampleCb;
@@ -242,6 +266,19 @@ EmgSnapshot emgRead() {
   EmgSnapshot s = shared;
   portEXIT_CRITICAL(&emgMux);
   return s;
+}
+
+bool emgBallenaBattery(float *volts, uint8_t *pct) {
+  uint32_t t = batLastMs;
+  uint32_t mv = batPinMv;
+  if (BALLENA_BAT_PIN < 0 || EMG_REMOTE || t == 0 || millis() - t > 5000) return false;
+  float v = mv / 1000.0f * BALLENA_BAT_DIVIDER;
+  float p = (v - BALLENA_BAT_V_EMPTY) / (BALLENA_BAT_V_FULL - BALLENA_BAT_V_EMPTY) * 100.0f;
+  if (p < 0) p = 0;
+  if (p > 100) p = 100;
+  *volts = v;
+  *pct = (uint8_t)lroundf(p);
+  return true;
 }
 
 float emgThreshold() { return thresholdMv; }
@@ -388,6 +425,16 @@ void emgSerialUpdate() {
       Serial.printf("[EMG] pin GPIO%d entrada=%d mV rms=%.1f mV umbral=%.1f mV activo=%d saturado=%d muestras=%lu\n",
                     EMG_PIN, s.rawCounts, (double)s.rmsMv, (double)emgThreshold(), s.active, s.saturated,
                     (unsigned long)s.sampleCount);
+      if (BALLENA_BAT_PIN >= 0 && !EMG_REMOTE) {
+        float bv;
+        uint8_t bp;
+        if (emgBallenaBattery(&bv, &bp)) {
+          Serial.printf("[BATERIA] pin GPIO%d %lu mV -> pila %.2f V = %u%%\n", BALLENA_BAT_PIN,
+                        (unsigned long)batPinMv, (double)bv, (unsigned)bp);
+        } else {
+          Serial.printf("[BATERIA] pin GPIO%d: sin lectura (revisar divisor)\n", BALLENA_BAT_PIN);
+        }
+      }
       Serial.println("[EMG] p = plot on/off | c = calibrar | t120 = umbral 120 mV | ? = estado");
     }
   }

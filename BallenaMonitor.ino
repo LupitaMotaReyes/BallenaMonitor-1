@@ -202,6 +202,14 @@ static void createBallenaBattery() {
 }
 
 static void updateBallenaBattery() {
+    // pila de 9 V medida por la propia pantalla (GPIO11, ver emg.h)
+    float bv;
+    uint8_t bp;
+    if (emgBallenaBattery(&bv, &bp)) {
+        ballenaBatteryMv = (uint16_t)lroundf(bv * 1000.0f);
+        ballenaBatteryPct = bp;
+        lastBallenaBatMs = millis();
+    }
     static int lastShown = -2;
     bool fresh = lastBallenaBatMs != 0 && millis() - lastBallenaBatMs < BATTERY_TIMEOUT_MS;
     int pct = fresh ? ballenaBatteryPct : -1;
@@ -1868,7 +1876,7 @@ void setup() {
     // Red Wi-Fi propia + servidor de datos (mismo canal que ESP-NOW)
     sessionLogBegin();
 
-    // EMG: modo remoto = recibe del ESP32 EMG por ESP-NOW (ver emg.h, EMG_REMOTE)
+    // EMG: la pantalla lee el circuito en GPIO10 y filtra la senal (ver emg.h, EMG_REMOTE = false)
     emgBegin();
     Serial.printf("[PANTALLA] MAC: %s  canal ESP-NOW %u\n", WiFi.macAddress().c_str(), ESPNOW_CHANNEL);
 

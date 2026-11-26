@@ -15,10 +15,14 @@
 #include <Arduino.h>
 
 // ---- De donde viene la senal ---------------------------------------------------
-// true  = la senal la lee OTRO ESP32 (pin D34) y la manda por ESP-NOW (sketch
-//         "EMG_Emisor"). La pantalla NO usa su ADC. (configuracion actual)
-// false = el circuito va directo al GPIO10 de la pantalla (conector Extended IO, pin 3).
-constexpr bool EMG_REMOTE = true;
+// false = el circuito va directo al GPIO10 de la pantalla (conector Extended IO) y
+//         la pantalla hace TODO: ADC + filtros + RMS + deteccion. (configuracion actual,
+//         ya no hace falta el ESP32 aparte)
+//         Conexion: salida del circuito -> GPIO10, GND del circuito -> GND de la pantalla,
+//         alimentacion del circuito -> 3V3 de la pantalla (la salida debe quedar entre 0 y 3.1 V).
+// true  = (modo anterior) la senal la lee OTRO ESP32 y la manda por ESP-NOW (sketch
+//         "EMG_Emisor"). La pantalla NO usa su ADC.
+constexpr bool EMG_REMOTE = false;
 // Sin mensajes del ESP32 EMG durante este tiempo -> senal = 0 y "EMG sin conexion"
 // (la tortuga se detiene: falla segura)
 constexpr uint32_t EMG_REMOTE_TIMEOUT_MS = 300;
@@ -29,6 +33,18 @@ constexpr uint32_t EMG_REMOTE_TIMEOUT_MS = 300;
 // (GPIO1..GPIO10 en el ESP32-S3). En el conector de expansion de la
 // WT32-SC01 Plus el unico de ADC1 es GPIO10. GPIO11..14 son ADC2: NO usarlos.
 constexpr int EMG_PIN = 10;
+
+// ---- Pila de 9 V de la ballena (solo si EMG_REMOTE = false) -----------------
+// BALLENA_BAT_PIN: GPIO11 del conector Extended IO. -1 = no conectada (la pantalla muestra "--").
+// GPIO11 es ADC2: comparte el ADC con el Wi-Fi y algunas lecturas pueden fallar. Se lee
+// 1 vez por segundo, las lecturas fallidas se ignoran y se conserva el ultimo valor bueno.
+// Divisor con 4 resistencias de 62k:
+//   + pila -> 62k -> 62k -> 62k -> GPIO11 -> 62k -> GND      (- pila -> GND de la pantalla)
+//   9.6 V (nueva) -> 2.4 V en el pin. BALLENA_BAT_DIVIDER = (3 x 62k + 62k) / 62k = 4
+constexpr int BALLENA_BAT_PIN = 11;
+constexpr float BALLENA_BAT_DIVIDER = 4.0f;
+constexpr float BALLENA_BAT_V_FULL = 9.0f;    // pila llena (100 %)
+constexpr float BALLENA_BAT_V_EMPTY = 7.0f;   // pila descargada (0 %)
 
 // Ganancia analogica total (AD620 x postamplificacion). Solo se usa para
 // reportar la amplitud estimada en el electrodo (uV) en el log de pruebas.
@@ -74,6 +90,11 @@ void emgRemoteFeed(float rmsMv, float peakMv, float inputMv, bool saturated, boo
 bool emgRemoteLinkOk();          // llegan mensajes del ESP32 EMG
 uint32_t emgRemoteLost();        // paquetes perdidos (segun seq)
 void emgRemoteCountSeq(uint8_t seq);
+
+// ---- Pila de la ballena (BALLENA_BAT_PIN) ----------------------------------------
+// Se lee en el mismo timer que la EMG (el ADC no se usa desde dos tareas a la vez).
+// Devuelve false si no hay lectura buena en los ultimos 5 s.
+bool emgBallenaBattery(float *volts, uint8_t *pct);
 
 float emgThreshold();
 void emgSetThreshold(float mv);  // se guarda en memoria (sobrevive al reinicio)
